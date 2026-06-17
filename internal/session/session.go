@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/creack/pty"
 	"golang.org/x/term"
@@ -46,11 +47,19 @@ func New(cfg *config.Config, args []string) (*Session, error) {
 func (s *Session) Run() (int, error) {
 	fmt.Fprintf(os.Stderr, "\033[2m[kuroko] logging → %s\033[0m\n", s.log.Path)
 
+	command := strings.Join(s.args, " ")
+
+	if err := s.notifier.NotifyStart(command); err != nil {
+		fmt.Fprintf(os.Stderr, "\033[33m[kuroko] notify error: %v\033[0m\n", err)
+	}
+
+	start := time.Now()
 	exitCode, err := s.runWithPTY()
+	duration := time.Since(start)
 
 	s.log.Close(exitCode)
 
-	if nerr := s.notifier.Notify(s.log.Path, strings.Join(s.args, " "), exitCode); nerr != nil {
+	if nerr := s.notifier.NotifyEnd(s.log.Path, command, exitCode, duration); nerr != nil {
 		fmt.Fprintf(os.Stderr, "\033[33m[kuroko] notify error: %v\033[0m\n", nerr)
 	}
 
