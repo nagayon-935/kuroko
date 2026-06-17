@@ -1,5 +1,10 @@
 # kuroko
 
+[![CI](https://github.com/nagayon-935/kuroko/actions/workflows/ci.yml/badge.svg)](https://github.com/nagayon-935/kuroko/actions/workflows/ci.yml)
+[![Coverage](https://codecov.io/gh/nagayon-935/kuroko/branch/main/graph/badge.svg)](https://codecov.io/gh/nagayon-935/kuroko)
+[![Go Report Card](https://goreportcard.com/badge/github.com/nagayon-935/kuroko)](https://goreportcard.com/report/github.com/nagayon-935/kuroko)
+[![Release](https://img.shields.io/github/v/release/nagayon-935/kuroko)](https://github.com/nagayon-935/kuroko/releases)
+
 ターミナル上の作業ログ（コマンドと出力結果）を自動保存する CLI ツール。  
 `ssh` や `screen` などのコマンドをラップして、セッションを透過的に記録します。
 

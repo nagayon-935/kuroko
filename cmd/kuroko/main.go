@@ -9,6 +9,9 @@ import (
 	"github.com/ryu/kuroko/internal/session"
 )
 
+// version is overridden at build time via -ldflags "-X main.version=v1.2.3"
+var version = "dev"
+
 const usage = `kuroko — transparent terminal session logger
 
 Usage:
@@ -59,7 +62,7 @@ func main() {
 		os.Exit(0)
 	}
 	if showVersion {
-		fmt.Println("kuroko v0.1.0")
+		fmt.Println("kuroko " + version)
 		os.Exit(0)
 	}
 
