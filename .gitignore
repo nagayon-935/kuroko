@@ -1,0 +1,19 @@
+# Compiled binary (root only, not cmd/kuroko/ source dir)
+/kuroko
+
+# Session logs (may contain sensitive info: passwords, IPs, configs)
+logs/
+*.log
+
+# Claude Code local settings
+.claude/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Go build artifacts
+*.test
+*.out
+/dist/
