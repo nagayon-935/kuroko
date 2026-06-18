@@ -130,3 +130,41 @@ func TestLogDirPermissions(t *testing.T) {
 		t.Errorf("LogDir permissions = %04o, want 0700", perm)
 	}
 }
+
+func TestLoadEnvNotifier(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("KUROKO_LOG_DIR", "")
+	t.Setenv("KUROKO_NOTIFIER", "discord")
+	t.Setenv("KUROKO_WEBHOOK_URL", "https://example.com/webhook")
+
+	cfg, err := Load(Options{})
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.Notifier.Type != "discord" {
+		t.Errorf("Notifier.Type = %q; want %q", cfg.Notifier.Type, "discord")
+	}
+	if cfg.Notifier.WebhookURL != "https://example.com/webhook" {
+		t.Errorf("Notifier.WebhookURL = %q; want %q", cfg.Notifier.WebhookURL, "https://example.com/webhook")
+	}
+}
+
+func TestLoadInvalidJSON(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("KUROKO_LOG_DIR", "")
+
+	configDir := filepath.Join(tmp, ".config", "kuroko")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte("{invalid json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(Options{})
+	if err == nil {
+		t.Error("expected error for invalid JSON, got nil")
+	}
+}
