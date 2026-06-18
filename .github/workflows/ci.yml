@@ -25,9 +25,7 @@ jobs:
       - name: Show coverage summary
         run: go tool cover -func=coverage.out | tail -1
 
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+      - name: Upload coverage to Coveralls
+        uses: shogo82148/actions-goveralls@v1
         with:
-          files: ./coverage.out
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
+          path-to-profile: coverage.out

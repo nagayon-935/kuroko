@@ -1,7 +1,7 @@
 # kuroko
 
 [![CI](https://github.com/nagayon-935/kuroko/actions/workflows/ci.yml/badge.svg)](https://github.com/nagayon-935/kuroko/actions/workflows/ci.yml)
-[![Coverage](https://codecov.io/gh/nagayon-935/kuroko/branch/main/graph/badge.svg)](https://codecov.io/gh/nagayon-935/kuroko)
+[![Coverage Status](https://coveralls.io/repos/github/nagayon-935/kuroko/badge.svg?branch=main)](https://coveralls.io/github/nagayon-935/kuroko)
 [![Go Report Card](https://goreportcard.com/badge/github.com/nagayon-935/kuroko)](https://goreportcard.com/report/github.com/nagayon-935/kuroko)
 [![Release](https://img.shields.io/github/v/release/nagayon-935/kuroko)](https://github.com/nagayon-935/kuroko/releases)
 
