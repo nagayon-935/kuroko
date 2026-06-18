@@ -83,16 +83,19 @@ func TestGenerateFilename(t *testing.T) {
 		name         string
 		args         []string
 		wantContains []string
+		wantAbsent   []string
 	}{
 		{
 			name:         "ssh user@host",
 			args:         []string{"ssh", "user@hostname"},
 			wantContains: []string{"ssh", "hostname"},
+			wantAbsent:   []string{"user@"},
 		},
 		{
 			name:         "ssh with -p",
 			args:         []string{"ssh", "-p", "2222", "user@host"},
 			wantContains: []string{"ssh", "host"},
+			wantAbsent:   []string{"user@"},
 		},
 		{
 			name:         "screen device",
@@ -119,6 +122,11 @@ func TestGenerateFilename(t *testing.T) {
 			for _, want := range tt.wantContains {
 				if !strings.Contains(got, want) {
 					t.Errorf("filename %q missing %q", got, want)
+				}
+			}
+			for _, absent := range tt.wantAbsent {
+				if strings.Contains(got, absent) {
+					t.Errorf("filename %q should not contain %q", got, absent)
 				}
 			}
 		})
@@ -219,9 +227,14 @@ func TestStripANSI(t *testing.T) {
 			want:  "line1\nline2\n",
 		},
 		{
-			name:  "bare CR removed",
+			name:  "bare CR preserved for processLine",
 			input: "text\roverwrite",
-			want:  "textoverwrite",
+			want:  "text\roverwrite",
+		},
+		{
+			name:  "doubled CRLF from PTY driver",
+			input: "content\r\r\n",
+			want:  "content\n",
 		},
 		{
 			name:  "plain text unchanged",
@@ -267,6 +280,159 @@ func TestLoggerANSIStripped(t *testing.T) {
 		if !strings.Contains(content, want) {
 			t.Errorf("log missing %q", want)
 		}
+	}
+}
+
+func TestLoggerCarriageReturn(t *testing.T) {
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host"})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// readline-style overwrite: type partial command, \r, then full command
+	l.Write([]byte("partial cmd\rfull command\n"))
+	l.Close(0)
+
+	data, _ := os.ReadFile(l.Path)
+	content := string(data)
+
+	if !strings.Contains(content, "full command") {
+		t.Errorf("expected 'full command' after CR overwrite, got:\n%s", content)
+	}
+	// "partial" should not appear as a standalone prefix; overwritten content
+	// must not bleed through.
+	if strings.Contains(content, "partial cmd") {
+		t.Errorf("overwritten 'partial cmd' should not survive in log:\n%s", content)
+	}
+}
+
+func TestLoggerBackspace(t *testing.T) {
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host"})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// User typed "helo", hit backspace, then "lo" — result should be "hello"
+	l.Write([]byte("helo\x08lo\n"))
+	l.Close(0)
+
+	data, _ := os.ReadFile(l.Path)
+	content := string(data)
+
+	if !strings.Contains(content, "hello") {
+		t.Errorf("expected 'hello' after backspace correction, got:\n%s", content)
+	}
+}
+
+func TestLoggerAltScreenSuppressed(t *testing.T) {
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host"})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// Simulate: shell prompt, then vim opens (alt screen), then vim closes, then prompt again.
+	l.Write([]byte("user@host:~$ vim file.txt\r\n"))
+	l.Write([]byte("\x1b[?1049h")) // enter alternate screen
+	l.Write([]byte("~\r\n~\r\n\"file.txt\" 0L, 0B\r\n"))
+	l.Write([]byte("\x1b[?1049l")) // exit alternate screen
+	l.Write([]byte("user@host:~$ \r\n"))
+	l.Close(0)
+
+	data, _ := os.ReadFile(l.Path)
+	content := string(data)
+
+	if strings.Contains(content, "\"file.txt\" 0L") {
+		t.Errorf("vim screen content should be suppressed, got:\n%s", content)
+	}
+	if !strings.Contains(content, "vim file.txt") {
+		t.Errorf("shell command before vim should be logged, got:\n%s", content)
+	}
+	if !strings.Contains(content, "full-screen app active") {
+		t.Errorf("suppression marker should be logged, got:\n%s", content)
+	}
+}
+
+func TestLoggerPartialEscapeAtBoundary(t *testing.T) {
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host"})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// Split \x1b[32m across two writes to simulate PTY buffer boundary.
+	l.Write([]byte("text\x1b"))
+	l.Write([]byte("[32mhello\x1b[0m\n"))
+	l.Close(0)
+
+	data, _ := os.ReadFile(l.Path)
+	content := string(data)
+
+	if bytes.Contains(data, []byte("\x1b")) {
+		t.Errorf("ESC byte leaked through partial-sequence boundary:\n%q", content)
+	}
+	if strings.Contains(content, "[32m") {
+		t.Errorf("ANSI parameter bytes leaked:\n%q", content)
+	}
+	if !strings.Contains(content, "texthello") {
+		t.Errorf("text content missing:\n%q", content)
+	}
+}
+
+// TestLoggerSplitCRLF reproduces the "cat command missing from log" bug.
+//
+// When the user presses Enter, the PTY emits \r\r\n (ONLCR doubling of \r\n).
+// If that sequence is split across two Write calls — \r at the end of one
+// write and \r\n (or just \n) at the start of the next — the stray \r was
+// previously processed by processLine, resetting lineCol to 0 before the \n
+// committed, producing a blank line instead of the command line.
+func TestLoggerSplitCRLF(t *testing.T) {
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host"})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// Write 1: prompt + command + trailing \r  (Enter echo, split from \n)
+	// Write 2: \n + first line of command output
+	l.Write([]byte("user@host:~$ cat file.txt\r"))
+	l.Write([]byte("\ncontents here\n"))
+	l.Close(0)
+
+	data, _ := os.ReadFile(l.Path)
+	content := string(data)
+
+	if !strings.Contains(content, "user@host:~$ cat file.txt") {
+		t.Errorf("command line should be logged; got:\n%s", content)
+	}
+	if !strings.Contains(content, "contents here") {
+		t.Errorf("command output should be logged; got:\n%s", content)
+	}
+}
+
+// TestLoggerSplitDoubleCRLF covers the case where both \r of a \r\r\n end up
+// at the tail of one write, with \n starting the next.
+func TestLoggerSplitDoubleCRLF(t *testing.T) {
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host"})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	l.Write([]byte("user@host:~$ ls\r\r"))
+	l.Write([]byte("\nfile.txt\n"))
+	l.Close(0)
+
+	data, _ := os.ReadFile(l.Path)
+	content := string(data)
+
+	if !strings.Contains(content, "user@host:~$ ls") {
+		t.Errorf("command line should be logged; got:\n%s", content)
+	}
+	if !strings.Contains(content, "file.txt") {
+		t.Errorf("command output should be logged; got:\n%s", content)
 	}
 }
 
