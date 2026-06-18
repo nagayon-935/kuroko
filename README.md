@@ -94,7 +94,7 @@ kuroko logs
 実行したコマンドの一覧（タイムライン）と、そのコマンドの出力結果を左右分割画面で確認できます。
 
 ```bash
-kuroko view ~/.config/kuroko/logs/xxxx_ssh_xxxx.log
+kuroko view <path_to_log_file>
 ```
 
 #### キー操作
