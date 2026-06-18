@@ -1316,8 +1316,44 @@ func TestIsShellPromptArrow(t *testing.T) {
 	}
 }
 
-// TestLoggerBackspacePendingCR covers the pendingCR + backspace code path which
-// resets lineCol to 0 and clears pendingCR before processing the backspace.
+// TestLoggerEscClearPendingCR tests that processing an escape sequence after \r
+// resolves the pendingCR so that a subsequent printable character is written
+// at the cursor position updated by the escape sequence rather than resetting it to 0.
+func TestLoggerEscClearPendingCR(t *testing.T) {
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host"}, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
 
+	// 1. Initial command: prompt + command "cat c9lab" (length: 13 + 9 = 22)
+	l.Write([]byte("user@host:~$ cat c9lab"))
 
+	// 2. Carriage return (sets pendingCR)
+	l.Write([]byte("\r"))
 
+	// 3. Move cursor right by 13 (to the start of the command "cat c9lab")
+	l.Write([]byte("\x1b[13C"))
+
+	// 4. Overwrite "cat" with "vim"
+	l.Write([]byte("vim"))
+
+	// Move cursor to the end of the line (6 characters to the right: " c9lab")
+	l.Write([]byte("\x1b[6C"))
+
+	// 5. Accept line (Enter)
+	l.Write([]byte("\r\r\n"))
+	l.Close(0)
+
+	data, err := os.ReadFile(l.Path)
+	if err != nil {
+		t.Fatalf("ReadFile %s: %v", l.Path, err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "user@host:~$ vim c9lab") {
+		t.Errorf("expected command to be 'user@host:~$ vim c9lab', got:\n%s", content)
+	}
+	if strings.Contains(content, "vimer@host:~$") {
+		t.Errorf("prompt was contaminated: %s", content)
+	}
+}

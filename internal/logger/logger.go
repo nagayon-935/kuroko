@@ -347,6 +347,18 @@ func (l *Logger) processLine(data []byte) error {
 			continue
 		}
 		if b == 0x1b {
+			if l.pendingCR {
+				// Snapshot the current lineBuf just before it gets overwritten,
+				// but only if it contains a valid shell prompt.
+				if l.lineCol > 0 {
+					if prompt, _ := SplitPrompt(l.lineBuf[:l.lineCol]); prompt != nil {
+						l.savedLine = append(l.savedLine[:0], l.lineBuf[:l.lineCol]...)
+						l.storedPrompt = append(l.storedPrompt[:0], prompt...)
+					}
+				}
+				l.lineCol = 0
+				l.pendingCR = false
+			}
 			l.inEsc = true
 			l.escBuf = []byte{b}
 			continue
