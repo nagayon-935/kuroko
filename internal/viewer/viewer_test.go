@@ -259,3 +259,98 @@ func TestViewerRunNonTerminal(t *testing.T) {
 		t.Error("expected error from Run when stdin is not a terminal")
 	}
 }
+
+func TestViewerScrollAndFocus(t *testing.T) {
+	v := &Viewer{
+		activePane: PaneTimeline,
+	}
+	if v.activePane != PaneTimeline {
+		t.Errorf("expected PaneTimeline, got %v", v.activePane)
+	}
+
+	v.outputScroll = 10
+	v.selected = 1
+	v.filteredIdx = []int{0, 1}
+	v.allCmds = []CommandMetadata{{Offset: 0}, {Offset: 10}}
+	v.logData = []byte(testLogContent)
+	v.updateOutput()
+	if v.outputScroll != 0 {
+		t.Errorf("expected outputScroll to be reset to 0, got %d", v.outputScroll)
+	}
+}
+
+func TestViewerOutputSearch(t *testing.T) {
+	v := &Viewer{
+		currentOutputLines: []string{
+			"hello world",
+			"test message",
+			"HELLO anti-gravity",
+			"some other output",
+		},
+	}
+
+	v.outputQuery = "hello"
+	v.updateMatches()
+
+	if len(v.matchLines) != 2 {
+		t.Fatalf("expected 2 matches, got %d", len(v.matchLines))
+	}
+	if v.matchLines[0] != 0 || v.matchLines[1] != 2 {
+		t.Errorf("expected match lines at 0 and 2, got %v", v.matchLines)
+	}
+	if v.activeMatch != 0 {
+		t.Errorf("expected activeMatch to be 0, got %d", v.activeMatch)
+	}
+
+	v.scrollToLine(v.matchLines[0], 5)
+	if v.outputScroll != 0 {
+		t.Errorf("expected outputScroll to be 0, got %d", v.outputScroll)
+	}
+}
+
+func TestSelectorScanAndFilter(t *testing.T) {
+	tmp := t.TempDir()
+
+	files := []string{"a.log", "b.log.gz", "c.txt"}
+	for _, f := range files {
+		path := filepath.Join(tmp, f)
+		if err := os.WriteFile(path, []byte("test"), 0o600); err != nil {
+			t.Fatalf("writing test file: %v", err)
+		}
+	}
+
+	s, err := newSelector(tmp)
+	if err != nil {
+		t.Fatalf("newSelector error: %v", err)
+	}
+
+	if len(s.items) != 2 {
+		t.Errorf("expected 2 selector items, got %d", len(s.items))
+	}
+
+	s.searchQuery = "b.log"
+	s.updateFilter()
+	if len(s.filtered) != 1 {
+		t.Errorf("expected 1 filtered item, got %d", len(s.filtered))
+	}
+	if s.filtered[0].name != "b.log.gz" {
+		t.Errorf("expected b.log.gz, got %s", s.filtered[0].name)
+	}
+}
+
+func TestHighlightQuery(t *testing.T) {
+	line := "Hello World"
+	query := "world"
+	res := highlightQuery(line, query, false)
+
+	expected := "Hello \x1b[30;43mWorld\x1b[0m"
+	if res != expected {
+		t.Errorf("expected %q, got %q", expected, res)
+	}
+
+	resActive := highlightQuery(line, query, true)
+	expectedActive := "Hello \x1b[30;42mWorld\x1b[0m"
+	if resActive != expectedActive {
+		t.Errorf("expected %q, got %q", expectedActive, resActive)
+	}
+}

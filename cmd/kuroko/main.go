@@ -80,7 +80,17 @@ func main() {
 		fmt.Print(usage)
 		os.Exit(0)
 	case "logs":
-		showLogs(config.Options{LogDir: logDir})
+		if len(rest) == 1 {
+			cfg, err := config.Load(config.Options{LogDir: logDir})
+			if err != nil {
+				fatalf("config error: %v", err)
+			}
+			if err := viewer.RunSelector(cfg); err != nil {
+				fatalf("selector error: %v", err)
+			}
+		} else {
+			showLogs(config.Options{LogDir: logDir})
+		}
 		os.Exit(0)
 	case "view":
 		if len(rest) < 2 {
