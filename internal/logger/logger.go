@@ -123,6 +123,7 @@ type Logger struct {
 	lineBuf   []byte // current output line being assembled
 	lineCol   int    // cursor column within lineBuf
 	pendingCR bool   // \r was the last control char seen; defer reset until next char
+	savedLine []byte // lineBuf snapshot taken at the first bare \r before any overwrite
 	writeSeq  uint64 // monotonic counter for raw debug chunks
 }
 
@@ -226,6 +227,12 @@ func (l *Logger) writeFiltered(data []byte) error {
 // next).  By NOT resetting lineCol immediately on \r, the content built up
 // in lineBuf survives until the \n commits it.  If a printable char follows
 // \r instead (readline overwrite), the deferred reset fires then.
+//
+// savedLine handles the readline "accept-line" redraw: just before executing
+// a command, bash/readline erases the prompt and redraws only the bare command
+// text (e.g. "cat foo" instead of "user@host:~$ cat foo").  The first bare \r
+// snapshots the full prompt+command into savedLine; if the subsequent overwrite
+// produces fewer chars, we commit savedLine so the prompt is preserved.
 func (l *Logger) processLine(data []byte) error {
 	for _, b := range data {
 		switch b {
@@ -237,13 +244,24 @@ func (l *Logger) processLine(data []byte) error {
 			if end > len(l.lineBuf) {
 				end = len(l.lineBuf)
 			}
-			if _, err := l.file.Write(append(l.lineBuf[:end:end], '\n')); err != nil {
+			// Prefer savedLine when a bare-\r overwrite produced fewer chars
+			// (readline accept-line strips the prompt before executing).
+			out := l.lineBuf[:end:end]
+			if len(l.savedLine) > end {
+				out = l.savedLine
+			}
+			if _, err := l.file.Write(append(out, '\n')); err != nil {
 				return err
 			}
 			l.lineBuf = l.lineBuf[:0]
 			l.lineCol = 0
+			l.savedLine = nil
 		case '\r':
-			// Defer the column reset; resolve it when the next char arrives.
+			// Snapshot the current line on the first bare \r so we can
+			// recover it if a subsequent overwrite strips the prompt.
+			if !l.pendingCR && l.lineCol > 0 {
+				l.savedLine = append(l.savedLine[:0], l.lineBuf[:l.lineCol]...)
+			}
 			l.pendingCR = true
 		case '\b':
 			if l.pendingCR {
@@ -273,13 +291,17 @@ func (l *Logger) processLine(data []byte) error {
 }
 
 func (l *Logger) Close(exitCode int) error {
-	// Flush any line that was not terminated with \n.
-	if l.lineCol > 0 {
-		end := l.lineCol
-		if end > len(l.lineBuf) {
-			end = len(l.lineBuf)
-		}
-		l.file.Write(l.lineBuf[:end])
+	// Flush any unterminated line; prefer savedLine when it is longer.
+	end := l.lineCol
+	if end > len(l.lineBuf) {
+		end = len(l.lineBuf)
+	}
+	out := l.lineBuf[:end]
+	if len(l.savedLine) > end {
+		out = l.savedLine
+	}
+	if len(out) > 0 {
+		l.file.Write(out)
 		l.file.WriteString("\n")
 	}
 

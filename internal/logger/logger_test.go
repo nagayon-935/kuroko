@@ -307,6 +307,37 @@ func TestLoggerCarriageReturn(t *testing.T) {
 	}
 }
 
+// TestLoggerReadlineAcceptLine reproduces the "cat prompt missing" bug.
+//
+// bash/readline's accept-line handler erases the prompt and redraws only the
+// bare command text (\r + cmd + \r\n) just before executing.  The logger must
+// prefer the pre-overwrite snapshot (prompt + command) over the shorter
+// post-overwrite content.
+func TestLoggerReadlineAcceptLine(t *testing.T) {
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host"})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// Simulate: prompt + command built up while the user types, then
+	// readline redraws with just the command (no prompt) before executing.
+	l.Write([]byte("user@host:~$ cat file.txt"))        // interactive echo
+	l.Write([]byte("\rcat file.txt\r\r\n"))              // accept-line redraw
+	l.Write([]byte("output line\n"))
+	l.Close(0)
+
+	data, _ := os.ReadFile(l.Path)
+	content := string(data)
+
+	if !strings.Contains(content, "user@host:~$ cat file.txt") {
+		t.Errorf("prompt should be preserved in log, got:\n%s", content)
+	}
+	if !strings.Contains(content, "output line") {
+		t.Errorf("command output should be in log, got:\n%s", content)
+	}
+}
+
 func TestLoggerBackspace(t *testing.T) {
 	tmp := t.TempDir()
 	l, err := New(tmp, []string{"ssh", "host"})
