@@ -8,13 +8,31 @@ import (
 )
 
 type Config struct {
-	LogDir   string          `json:"log_dir"`
-	Notifier NotifierConfig  `json:"notifier"`
+	LogDir    string          `json:"log_dir"`
+	Notifier  NotifierConfig  `json:"notifier"`
+	Storage   StorageConfig   `json:"storage"`
+	Redaction RedactionConfig  `json:"redaction"`
 }
 
 type NotifierConfig struct {
 	Type       string `json:"type"`        // "none", "discord", "slack"
 	WebhookURL string `json:"webhook_url"`
+}
+
+type StorageConfig struct {
+	CompressOnClose     bool           `json:"compress_on_close"`
+	CompressThresholdMB int            `json:"compress_threshold_mb"` // 0 means always compress if compress_on_close is true
+	Rotation            RotationConfig `json:"rotation"`
+}
+
+type RotationConfig struct {
+	Enabled        bool `json:"enabled"`
+	MaxAgeDays     int  `json:"max_age_days"`
+	MaxTotalSizeMB int  `json:"max_total_size_mb"`
+}
+
+type RedactionConfig struct {
+	Enabled bool `json:"enabled"`
 }
 
 // Options are overrides supplied via CLI flags (highest priority).
@@ -36,6 +54,18 @@ func Load(opt Options) (*Config, error) {
 		LogDir: filepath.Join(configDir, "logs"),
 		Notifier: NotifierConfig{
 			Type: "none",
+		},
+		Storage: StorageConfig{
+			CompressOnClose:     false,
+			CompressThresholdMB: 0,
+			Rotation: RotationConfig{
+				Enabled:        false,
+				MaxAgeDays:     30,
+				MaxTotalSizeMB: 1024,
+			},
+		},
+		Redaction: RedactionConfig{
+			Enabled: false,
 		},
 	}
 

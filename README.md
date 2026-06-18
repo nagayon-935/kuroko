@@ -88,6 +88,20 @@ kuroko -d ~/work/logs ssh user@hostname
 kuroko logs
 ```
 
+### ログの閲覧 (TUI ビューア)
+
+保存されたログファイルを TUI (Terminal User Interface) で見やすく閲覧できます。  
+実行したコマンドの一覧（タイムライン）と、そのコマンドの出力結果を左右分割画面で確認できます。
+
+```bash
+kuroko view ~/.config/kuroko/logs/xxxx_ssh_xxxx.log
+```
+
+#### キー操作
+- `j` / `k` または `↓` / `↑` : コマンドの選択移動
+- `/` : 実行コマンドの検索モード（キーワード入力後 Enter で確定、Esc で検索解除）
+- `q` / `Esc` : ビューアの終了
+
 ### ログの中身
 
 ```
@@ -174,7 +188,8 @@ kuroko/
 │   ├── config/config.go        # 設定管理
 │   ├── logger/logger.go        # ログファイル生成
 │   ├── session/session.go      # PTY セッション制御
-│   └── notifier/notifier.go    # 外部通知（Discord / Slack）
+│   ├── notifier/notifier.go    # 外部通知（Discord / Slack）
+│   └── viewer/viewer.go        # TUI ログビューア
 ├── go.mod
 └── Makefile
 ```

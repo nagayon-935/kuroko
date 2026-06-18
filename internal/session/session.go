@@ -26,7 +26,7 @@ type Session struct {
 }
 
 func New(cfg *config.Config, args []string) (*Session, error) {
-	log, err := logger.New(cfg.LogDir, args)
+	log, err := logger.New(cfg.LogDir, args, cfg.Redaction.Enabled)
 	if err != nil {
 		return nil, fmt.Errorf("creating log file: %w", err)
 	}
@@ -59,7 +59,33 @@ func (s *Session) Run() (int, error) {
 
 	s.log.Close(exitCode)
 
-	if nerr := s.notifier.NotifyEnd(s.log.Path, command, exitCode, duration); nerr != nil {
+	logPath := s.log.Path
+	if s.cfg.Storage.CompressOnClose {
+		shouldCompress := true
+		if s.cfg.Storage.CompressThresholdMB > 0 {
+			if info, err := os.Stat(s.log.Path); err == nil {
+				sizeMB := info.Size() / (1024 * 1024)
+				shouldCompress = sizeMB >= int64(s.cfg.Storage.CompressThresholdMB)
+			}
+		}
+
+		if shouldCompress {
+			if compressedPath, cerr := logger.CompressFile(s.log.Path); cerr == nil {
+				logPath = compressedPath
+			} else {
+				fmt.Fprintf(os.Stderr, "\033[33m[kuroko] compression error: %v\033[0m\n", cerr)
+			}
+		}
+	}
+
+	if s.cfg.Storage.Rotation.Enabled {
+		// Run GC in background so we don't block terminal exit.
+		go func() {
+			_ = logger.RotateLogs(s.cfg.LogDir, s.cfg.Storage.Rotation.MaxAgeDays, s.cfg.Storage.Rotation.MaxTotalSizeMB)
+		}()
+	}
+
+	if nerr := s.notifier.NotifyEnd(logPath, command, exitCode, duration); nerr != nil {
 		fmt.Fprintf(os.Stderr, "\033[33m[kuroko] notify error: %v\033[0m\n", nerr)
 	}
 

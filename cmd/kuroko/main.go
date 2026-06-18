@@ -7,6 +7,7 @@ import (
 
 	"github.com/ryu/kuroko/internal/config"
 	"github.com/ryu/kuroko/internal/session"
+	"github.com/ryu/kuroko/internal/viewer"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=v1.2.3"
@@ -28,6 +29,7 @@ Examples:
   kuroko --log-dir ~/work/logs screen /dev/ttyUSB0 115200
   kuroko bash
   kuroko logs           List saved logs
+  kuroko view <logfile>  View a saved log session interactively
 
 Logs are saved to ~/.config/kuroko/logs/ by default.
 
@@ -79,6 +81,14 @@ func main() {
 		os.Exit(0)
 	case "logs":
 		showLogs(config.Options{LogDir: logDir})
+		os.Exit(0)
+	case "view":
+		if len(rest) < 2 {
+			fatalf("usage: kuroko view <logfile>")
+		}
+		if err := viewer.Run(rest[1]); err != nil {
+			fatalf("viewer error: %v", err)
+		}
 		os.Exit(0)
 	}
 

@@ -2,9 +2,13 @@ package logger
 
 import (
 	"bytes"
+	"compress/gzip"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestExtractSSHTarget(t *testing.T) {
@@ -180,7 +184,7 @@ func TestUniquePath(t *testing.T) {
 
 func TestNewLoggerFilePermissions(t *testing.T) {
 	tmp := t.TempDir()
-	l, err := New(tmp, []string{"ssh", "user@host"})
+	l, err := New(tmp, []string{"ssh", "user@host"}, false)
 	if err != nil {
 		t.Fatalf("New() error: %v", err)
 	}
@@ -254,7 +258,7 @@ func TestStripANSI(t *testing.T) {
 
 func TestLoggerANSIStripped(t *testing.T) {
 	tmp := t.TempDir()
-	l, err := New(tmp, []string{"ssh", "host"})
+	l, err := New(tmp, []string{"ssh", "host"}, false)
 	if err != nil {
 		t.Fatalf("New() error: %v", err)
 	}
@@ -285,7 +289,7 @@ func TestLoggerANSIStripped(t *testing.T) {
 
 func TestLoggerCarriageReturn(t *testing.T) {
 	tmp := t.TempDir()
-	l, err := New(tmp, []string{"ssh", "host"})
+	l, err := New(tmp, []string{"ssh", "host"}, false)
 	if err != nil {
 		t.Fatalf("New() error: %v", err)
 	}
@@ -315,7 +319,7 @@ func TestLoggerCarriageReturn(t *testing.T) {
 // post-overwrite content.
 func TestLoggerReadlineAcceptLine(t *testing.T) {
 	tmp := t.TempDir()
-	l, err := New(tmp, []string{"ssh", "host"})
+	l, err := New(tmp, []string{"ssh", "host"}, false)
 	if err != nil {
 		t.Fatalf("New() error: %v", err)
 	}
@@ -340,7 +344,7 @@ func TestLoggerReadlineAcceptLine(t *testing.T) {
 
 func TestLoggerBackspace(t *testing.T) {
 	tmp := t.TempDir()
-	l, err := New(tmp, []string{"ssh", "host"})
+	l, err := New(tmp, []string{"ssh", "host"}, false)
 	if err != nil {
 		t.Fatalf("New() error: %v", err)
 	}
@@ -359,7 +363,7 @@ func TestLoggerBackspace(t *testing.T) {
 
 func TestLoggerAltScreenSuppressed(t *testing.T) {
 	tmp := t.TempDir()
-	l, err := New(tmp, []string{"ssh", "host"})
+	l, err := New(tmp, []string{"ssh", "host"}, false)
 	if err != nil {
 		t.Fatalf("New() error: %v", err)
 	}
@@ -381,14 +385,14 @@ func TestLoggerAltScreenSuppressed(t *testing.T) {
 	if !strings.Contains(content, "vim file.txt") {
 		t.Errorf("shell command before vim should be logged, got:\n%s", content)
 	}
-	if !strings.Contains(content, "full-screen app active") {
-		t.Errorf("suppression marker should be logged, got:\n%s", content)
+	if strings.Contains(content, "full-screen app active") {
+		t.Errorf("suppression marker should not be logged, got:\n%s", content)
 	}
 }
 
 func TestLoggerPartialEscapeAtBoundary(t *testing.T) {
 	tmp := t.TempDir()
-	l, err := New(tmp, []string{"ssh", "host"})
+	l, err := New(tmp, []string{"ssh", "host"}, false)
 	if err != nil {
 		t.Fatalf("New() error: %v", err)
 	}
@@ -421,7 +425,7 @@ func TestLoggerPartialEscapeAtBoundary(t *testing.T) {
 // committed, producing a blank line instead of the command line.
 func TestLoggerSplitCRLF(t *testing.T) {
 	tmp := t.TempDir()
-	l, err := New(tmp, []string{"ssh", "host"})
+	l, err := New(tmp, []string{"ssh", "host"}, false)
 	if err != nil {
 		t.Fatalf("New() error: %v", err)
 	}
@@ -447,7 +451,7 @@ func TestLoggerSplitCRLF(t *testing.T) {
 // at the tail of one write, with \n starting the next.
 func TestLoggerSplitDoubleCRLF(t *testing.T) {
 	tmp := t.TempDir()
-	l, err := New(tmp, []string{"ssh", "host"})
+	l, err := New(tmp, []string{"ssh", "host"}, false)
 	if err != nil {
 		t.Fatalf("New() error: %v", err)
 	}
@@ -467,9 +471,132 @@ func TestLoggerSplitDoubleCRLF(t *testing.T) {
 	}
 }
 
+// TestLoggerSameLengthCommandSwap reproduces the "vim/cat order swap" bug.
+//
+// When two commands share the same display length (prompt+cmd), the accept-line
+// \r for the SECOND command must overwrite the stale savedLine from the first,
+// even though the lengths are equal.  Using > instead of >= caused the stale
+// savedLine to survive, committing the WRONG command to the log.
+func TestLoggerSameLengthCommandSwap(t *testing.T) {
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host"}, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// Simulate: user browsed history to "cat file", readline refreshed (bare
+	// \r sets savedLine=cat), then user switched to "vim file" (same length).
+	// Both commands are deliberately the same byte-length.
+	l.Write([]byte("user@host:~$ cat file"))   // readline echo — 21 chars
+	l.Write([]byte("\r"))                       // Ctrl-U / readline refresh \r → savedLine = cat cmd
+	l.Write([]byte("user@host:~$ vim file"))   // readline redraws with vim cmd
+	l.Write([]byte("\ruser@host:~$ vim file")) // vim accept-line redraw
+	l.Write([]byte("\r\r\n"))                  // accept-line CRLF (ONLCR)
+	l.Write([]byte("[vim output]\n"))
+	l.Close(0)
+
+	data, _ := os.ReadFile(l.Path)
+	content := string(data)
+
+	if !strings.Contains(content, "user@host:~$ vim file") {
+		t.Errorf("vim command should be in log, got:\n%s", content)
+	}
+	if strings.Contains(content, "user@host:~$ cat file") {
+		t.Errorf("stale cat command must not appear in log, got:\n%s", content)
+	}
+}
+
+// TestLoggerReadlineAcceptLineSplit reproduces the "post-vim cat prompt missing"
+// bug.  The PTY's ONLCR conversion turns the accept-line \r\n into \r\r\n.
+// When that triple-byte sequence is split across writes (\r\r in one, \n in the
+// next), the second bare \r was overwriting savedLine with just the command
+// (no prompt), so the committed line lost the prompt.
+func TestLoggerReadlineAcceptLineSplit(t *testing.T) {
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host"}, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// Build up prompt+command as readline would echo it.
+	l.Write([]byte("user@host:~$ cat file.txt")) // interactive echo (P+C chars)
+	// accept-line sequence with \r\r\n split across writes:
+	//   write 1: \r (accept-line) + command + \r\r (ONLCR artifact, \n not yet)
+	//   write 2: \n (arrives in the next read)
+	l.Write([]byte("\rcat file.txt\r\r")) // accept-line \r + cmd + trailing \r\r
+	l.Write([]byte("\noutput line\n"))    // \n from next write, then command output
+	l.Close(0)
+
+	data, _ := os.ReadFile(l.Path)
+	content := string(data)
+
+	if !strings.Contains(content, "user@host:~$ cat file.txt") {
+		t.Errorf("prompt should be preserved after split ONLCR, got:\n%s", content)
+	}
+	if !strings.Contains(content, "output line") {
+		t.Errorf("command output should be in log, got:\n%s", content)
+	}
+}
+
+// TestLoggerHistoryContaminationSwap reproduces the vim/cat label swap that
+// occurs when readline history browsing renders text from a different command
+// (e.g. "cat") into lineBuf just before the accept-line \r for "vim".
+//
+// The contaminated savedLine must NOT win; instead the logger should
+// reconstruct prompt+bare_cmd using the stored prompt learned from an earlier
+// clean command.
+func TestLoggerHistoryContaminationSwap(t *testing.T) {
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host"}, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// ── Step 1: clean "ll" command (teaches storedPrompt) ──────────────────
+	l.Write([]byte("user@host:~$ ll\r\r\n"))
+	l.Write([]byte("total 8\nfile.txt\n"))
+
+	// ── Step 2: vim command with history-browsing contamination ─────────────
+	// Simulates readline rendering "cat c9lab/..." (from history) into lineBuf
+	// before accept-line fires for "vim c9lab/...".
+	// After ANSI stripping the history rendering looks like raw text appended
+	// to whatever the prompt wrote — hence the garbage prefix below.
+	l.Write([]byte("user@host:~$ cat c9lab/x.yml")) // history display artifact
+	l.Write([]byte("\r"))                            // accept-line \r → savedLine = "...cat..." (garbage)
+	l.Write([]byte("vim c9lab/x.yml"))              // bare cmd overwrites from col 0
+	l.Write([]byte("\r\r\n"))                        // ONLCR CRLF
+	l.Write([]byte("[full-screen app active — output suppressed]\n"))
+
+	// ── Step 3: cat command with history-browsing contamination ─────────────
+	l.Write([]byte("user@host:~$ vim c9lab/x.yml")) // history display artifact (vim from prev)
+	l.Write([]byte("\r"))                            // accept-line \r → savedLine = "...vim..." (garbage)
+	l.Write([]byte("cat c9lab/x.yml"))              // bare cmd overwrites from col 0
+	l.Write([]byte("\r\r\n"))                        // ONLCR CRLF
+	l.Write([]byte("name: foo\n"))
+	l.Close(0)
+
+	data, _ := os.ReadFile(l.Path)
+	content := string(data)
+
+	// vim label must appear (reconstructed from stored prompt + bare cmd)
+	if !strings.Contains(content, "vim c9lab/x.yml") {
+		t.Errorf("vim command should appear in log:\n%s", content)
+	}
+	// cat label must appear
+	if !strings.Contains(content, "cat c9lab/x.yml") {
+		t.Errorf("cat command should appear in log:\n%s", content)
+	}
+	// vim must come BEFORE cat in the log (correct chronological order)
+	vimIdx := strings.Index(content, "vim c9lab/x.yml")
+	catIdx := strings.Index(content, "cat c9lab/x.yml")
+	if vimIdx >= catIdx {
+		t.Errorf("vim (%d) should appear before cat (%d) in log:\n%s", vimIdx, catIdx, content)
+	}
+}
+
 func TestLoggerWriteAndClose(t *testing.T) {
 	tmp := t.TempDir()
-	l, err := New(tmp, []string{"echo", "hello"})
+	l, err := New(tmp, []string{"echo", "hello"}, false)
 	if err != nil {
 		t.Fatalf("New() error: %v", err)
 	}
@@ -493,3 +620,365 @@ func TestLoggerWriteAndClose(t *testing.T) {
 		t.Errorf("log missing exit code footer, got:\n%s", content)
 	}
 }
+
+func TestCompressFile(t *testing.T) {
+	tmp := t.TempDir()
+	srcPath := filepath.Join(tmp, "test.log")
+	content := []byte("hello compression test\n")
+	if err := os.WriteFile(srcPath, content, 0o600); err != nil {
+		t.Fatalf("WriteFile error: %v", err)
+	}
+
+	dstPath, err := CompressFile(srcPath)
+	if err != nil {
+		t.Fatalf("CompressFile error: %v", err)
+	}
+
+	// Verify original file is deleted
+	if _, err := os.Stat(srcPath); !os.IsNotExist(err) {
+		t.Errorf("original file still exists: %s", srcPath)
+	}
+
+	// Verify destination file ends with .gz
+	if !strings.HasSuffix(dstPath, ".gz") {
+		t.Errorf("expected destination path to end with .gz, got: %s", dstPath)
+	}
+
+	// Read and decompress
+	f, err := os.Open(dstPath)
+	if err != nil {
+		t.Fatalf("open compressed file error: %v", err)
+	}
+	defer f.Close()
+
+	gr, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatalf("new gzip reader error: %v", err)
+	}
+	defer gr.Close()
+
+	decompressed, err := io.ReadAll(gr)
+	if err != nil {
+		t.Fatalf("read decompressed error: %v", err)
+	}
+
+	if string(decompressed) != string(content) {
+		t.Errorf("decompressed content = %q, want %q", string(decompressed), string(content))
+	}
+}
+
+func TestRotateLogs(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Create 3 log files with different modification times and sizes
+	// log1: 10 days old, 100 bytes
+	// log2: 5 days old, 200 bytes
+	// log3: 1 day old, 300 bytes
+	files := []struct {
+		name    string
+		ageDays int
+		size    int
+	}{
+		{"log1.log", 10, 100},
+		{"log2.log", 5, 200},
+		{"log3.log.gz", 1, 300},
+	}
+
+	now := time.Now()
+	for _, f := range files {
+		path := filepath.Join(tmp, f.name)
+		content := make([]byte, f.size)
+		if err := os.WriteFile(path, content, 0o600); err != nil {
+			t.Fatalf("WriteFile error: %v", err)
+		}
+		// Change modtime
+		mTime := now.Add(-time.Duration(f.ageDays) * 24 * time.Hour)
+		if err := os.Chtimes(path, mTime, mTime); err != nil {
+			t.Fatalf("Chtimes error: %v", err)
+		}
+	}
+
+	// Test case 1: Rotate by age (maxAgeDays = 7)
+	// log1 (10 days) should be deleted, log2 and log3 should remain.
+	if err := RotateLogs(tmp, 7, 0); err != nil {
+		t.Fatalf("RotateLogs by age error: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(tmp, "log1.log")); !os.IsNotExist(err) {
+		t.Error("log1.log (10 days old) should have been deleted")
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "log2.log")); err != nil {
+		t.Error("log2.log (5 days old) should not have been deleted")
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "log3.log.gz")); err != nil {
+		t.Error("log3.log.gz (1 day old) should not have been deleted")
+	}
+
+	// Test case 2: Rotate by size (maxTotalSizeMB = 1 (1MB), but we create a 1.5MB file to trigger it)
+	largeContent := make([]byte, 1024*1024*3/2) // 1.5MB
+	largePath := filepath.Join(tmp, "log4.log")
+	if err := os.WriteFile(largePath, largeContent, 0o600); err != nil {
+		t.Fatalf("WriteFile error: %v", err)
+	}
+	mTime := now.Add(-2 * 24 * time.Hour)
+	if err := os.Chtimes(largePath, mTime, mTime); err != nil {
+		t.Fatalf("Chtimes error: %v", err)
+	}
+
+	// Currently in folder:
+	// log2.log (5 days old, 200 bytes)
+	// log4.log (2 days old, 1.5MB)
+	// log3.log.gz (1 day old, 300 bytes)
+	// Total size is > 1.5MB, limit is 1MB.
+	// log2 (oldest) and log4 (second oldest) should be deleted.
+	if err := RotateLogs(tmp, 0, 1); err != nil {
+		t.Fatalf("RotateLogs by size error: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(tmp, "log2.log")); !os.IsNotExist(err) {
+		t.Error("log2.log (oldest) should have been deleted")
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "log4.log")); !os.IsNotExist(err) {
+		t.Error("log4.log (second oldest, large) should have been deleted")
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "log3.log.gz")); err != nil {
+		t.Error("log3.log.gz (newest) should not have been deleted")
+	}
+}
+
+func TestLoggerRedaction(t *testing.T) {
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host"}, true) // redactionEnabled = true
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// 1. AWS Access Key
+	l.Write([]byte("my key is AKIA1234567890123456 here\n"))
+
+	// 2. AWS Secret Key
+	l.Write([]byte("export AWS_SECRET_ACCESS_KEY=\"abcd1234abcd1234abcd1234abcd1234abcd1234\"\n"))
+
+	// 3. Bearer Token
+	l.Write([]byte("Authorization: Bearer my_secret_jwt_token_123_abc\n"))
+
+	// 4. SQL Password
+	l.Write([]byte("ALTER USER 'ryu' IDENTIFIED BY 'super-secret-password';\n"))
+
+	// 5. PEM Private Key (Stateful Block)
+	l.Write([]byte("header info\n"))
+	l.Write([]byte("-----BEGIN PRIVATE KEY-----\n"))
+	l.Write([]byte("MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDh...\n"))
+	l.Write([]byte("-----END PRIVATE KEY-----\n"))
+	l.Write([]byte("footer info\n"))
+
+	l.Close(0)
+
+	data, err := os.ReadFile(l.Path)
+	if err != nil {
+		t.Fatalf("ReadFile error: %v", err)
+	}
+	content := string(data)
+
+	// Asserts
+	if strings.Contains(content, "AKIA1234567890123456") {
+		t.Error("AWS Access Key was not redacted")
+	}
+	if !strings.Contains(content, "[AWS_ACCESS_KEY_REDACTED]") {
+		t.Error("Missing AWS Access Key redacted placeholder")
+	}
+
+	if strings.Contains(content, "abcd1234abcd1234abcd1234abcd1234abcd1234") {
+		t.Error("AWS Secret Key was not redacted")
+	}
+	if !strings.Contains(content, "[AWS_SECRET_KEY_REDACTED]") {
+		t.Error("Missing AWS Secret Key redacted placeholder")
+	}
+
+	if strings.Contains(content, "my_secret_jwt_token_123_abc") {
+		t.Error("Bearer Token was not redacted")
+	}
+	if !strings.Contains(content, "[TOKEN_REDACTED]") {
+		t.Error("Missing Bearer Token redacted placeholder")
+	}
+
+	if strings.Contains(content, "super-secret-password") {
+		t.Error("SQL Password was not redacted")
+	}
+	if !strings.Contains(content, "[PASSWORD_REDACTED]") {
+		t.Error("Missing SQL Password redacted placeholder")
+	}
+
+	if strings.Contains(content, "MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDh") {
+		t.Error("PEM Private Key data was not redacted")
+	}
+	if !strings.Contains(content, "[PEM PRIVATE KEY BLOCK STARTED - REDACTED]") {
+		t.Error("Missing PEM start placeholder")
+	}
+	if !strings.Contains(content, "[PEM PRIVATE KEY DATA - REDACTED]") {
+		t.Error("Missing PEM data placeholder")
+	}
+	if !strings.Contains(content, "[PEM PRIVATE KEY BLOCK ENDED - REDACTED]") {
+		t.Error("Missing PEM end placeholder")
+	}
+}
+
+func TestLoggerHistoryLengthChange(t *testing.T) {
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host"}, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// ── Step 1: ユーザーが長いコマンドを表示して履歴から切り替える ──
+	l.Write([]byte("user@host:~$ cat very_long_command_name_here.txt")) // 履歴の長いコマンドが描画される
+	l.Write([]byte("\r"))                                               // 次のコマンドへの切り替え
+	l.Write([]byte("user@host:~$ ll"))                                  // 短いコマンドが上書き描画される
+	l.Write([]byte("\ruser@host:~$ ll"))                                // エンターキー押下時の readline accept-line 再描画
+	l.Write([]byte("\r\r\n"))                                           // ONLCR CRLF
+	l.Write([]byte("file1.txt\n"))
+	l.Close(0)
+
+	data, _ := os.ReadFile(l.Path)
+	content := string(data)
+
+	// 短いコマンド "ll" が実行された際に、プロンプトが正しく復元されていること
+	if !strings.Contains(content, "user@host:~$ ll") {
+		t.Errorf("prompt should be restored for ll, got:\n%s", content)
+	}
+	// 古い長いコマンドが誤ってマージされて残っていないこと
+	if strings.Contains(content, "very_long_command_name_here.txt") {
+		t.Errorf("stale very long command should not remain in log, got:\n%s", content)
+	}
+}
+
+func TestLoggerNoAcceptLineRedraw(t *testing.T) {
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host"}, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// Type "user@host:~$ ll" directly, followed by CRLF without accept-line redraw
+	l.Write([]byte("user@host:~$ ll\r\r\n"))
+	l.Write([]byte("total 0\n"))
+	l.Close(0)
+
+	data, _ := os.ReadFile(l.Path)
+	content := string(data)
+
+	// Verify metadata line is present
+	if !strings.Contains(content, "# kuroko:cmd:") {
+		t.Errorf("expected metadata line for ll, got:\n%s", content)
+	}
+	// Verify prompt + command line is present
+	if !strings.Contains(content, "user@host:~$ ll") {
+		t.Errorf("expected 'user@host:~$ ll', got:\n%s", content)
+	}
+}
+
+func TestLoggerHistoryRecallVim(t *testing.T) {
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host"}, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// 1. Initial command to learn the prompt
+	l.Write([]byte("user@host:~$ ll\r\r\n"))
+	l.Write([]byte("total 0\n"))
+
+	// 2. Browse history, rendering "cat file.txt" then "vim"
+	l.Write([]byte("user@host:~$ cat file.txt")) // show cat from history
+	l.Write([]byte("\r"))                         // navigate history
+	l.Write([]byte("vim"))                        // show vim (only cmd written due to redraw optimization/cursor)
+	l.Write([]byte("\rvim\r\r\n"))                // accept-line sequence for vim
+	l.Write([]byte("[alt screen active]\n"))
+	l.Close(0)
+
+	data, _ := os.ReadFile(l.Path)
+	content := string(data)
+
+	// Verify metadata line is present
+	if !strings.Contains(content, "# kuroko:cmd:") {
+		t.Errorf("expected metadata line, got:\n%s", content)
+	}
+	if !strings.Contains(content, "user@host:~$ vim") {
+		t.Errorf("expected reconstructed prompt for vim 'user@host:~$ vim', got:\n%s", content)
+	}
+}
+
+func TestLoggerPromptValidation(t *testing.T) {
+	// 1. Valid prompt shapes
+	validPrompts := [][]byte{
+		[]byte("user@host:~$ "),
+		[]byte("user.name@domain.com:~$ "),
+		[]byte("containerlab-vm# "),
+		[]byte("[user@host path]$ "),
+		[]byte("(venv) user@host:~$ "),
+		[]byte("user@host ❯ "),
+		[]byte("❯ "),
+		[]byte("user@host:~/repo (main) $ "),
+	}
+	for _, p := range validPrompts {
+		if !IsShellPrompt(p) {
+			t.Errorf("expected IsShellPrompt(%q) to be true", string(p))
+		}
+	}
+
+	// 2. Invalid prompt shapes (false positives)
+	invalidPrompts := [][]byte{
+		[]byte("    ### DCI ###"),
+		[]byte("echo $ "),
+		[]byte("cat $ "),
+		[]byte("git branch $ "),
+		[]byte("### "),
+		[]byte(" > "),
+	}
+	for _, p := range invalidPrompts {
+		if IsShellPrompt(p) {
+			t.Errorf("expected IsShellPrompt(%q) to be false", string(p))
+		}
+	}
+}
+
+func TestLoggerEscapeSequences(t *testing.T) {
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host"}, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// 1. Initial prompt printed
+	l.Write([]byte("user@host:~$ "))
+
+	// 2. User presses UP arrow, which draws:
+	// "cat very_long_command.txt"
+	// Then user presses UP arrow again, which edits the line in-place:
+	// sends carriage return \r, writes "vim", and clears the rest of the line with \x1b[K
+	l.Write([]byte("cat very_long_command.txt"))
+	l.Write([]byte("\rvim\x1b[K")) // carriage return + "vim" + clear to end of line
+
+	// 3. User hits Enter (accept-line redraw: \rvim\r\r\n -> becomes \rvim\n)
+	l.Write([]byte("\rvim\r\r\n"))
+	l.Write([]byte("[alt screen]\n"))
+	l.Close(0)
+
+	data, _ := os.ReadFile(l.Path)
+	content := string(data)
+
+	// Verify that the prompt and command were reconstructed correctly as "user@host:~$ vim"
+	if !strings.Contains(content, "user@host:~$ vim") {
+		t.Errorf("expected reconstructed prompt 'user@host:~$ vim', got:\n%s", content)
+	}
+	if strings.Contains(content, "very_long_command") {
+		t.Errorf("expected stale command 'very_long_command' to be cleared by ESC K, but it remains:\n%s", content)
+	}
+	// Verify metadata line is present
+	if !strings.Contains(content, "# kuroko:cmd:") {
+		t.Errorf("expected metadata line for vim, got:\n%s", content)
+	}
+}
+
+
+

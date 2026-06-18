@@ -2,11 +2,14 @@ package logger
 
 import (
 	"bytes"
+	"compress/gzip"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -112,22 +115,122 @@ var (
 	exitAltScreen  = []byte("\x1b[?1049l") // alternate screen exit
 )
 
+// IsShellPrompt reports whether p looks like a shell prompt.
+func IsShellPrompt(p []byte) bool {
+	if len(p) < 2 {
+		return false
+	}
+	// The prompt must start at column 0 (no leading spaces)
+	if p[0] == ' ' || p[0] == '\t' {
+		return false
+	}
+
+	var hasIndicator bool
+	var indicatorLen int
+	tail := p[len(p)-2:]
+	if bytes.Equal(tail, []byte("$ ")) || bytes.Equal(tail, []byte("# ")) || bytes.Equal(tail, []byte("% ")) || bytes.Equal(tail, []byte("> ")) {
+		hasIndicator = true
+		indicatorLen = 2
+	} else {
+		// Check for multi-byte prompts like "❯ " or "➔ "
+		if bytes.Contains(p, []byte("❯")) {
+			idx := bytes.Index(p, []byte("❯"))
+			hasIndicator = true
+			indicatorLen = len(p) - idx
+		} else if bytes.Contains(p, []byte("➔")) {
+			idx := bytes.Index(p, []byte("➔"))
+			hasIndicator = true
+			indicatorLen = len(p) - idx
+		}
+	}
+
+	if !hasIndicator {
+		return false
+	}
+
+	prefix := p[:len(p)-indicatorLen]
+	trimmedPrefix := bytes.TrimSpace(prefix)
+	if len(trimmedPrefix) == 0 {
+		return true // Raw prompts like "$ ", "# ", "❯ "
+	}
+	// Validate characters and structure of prompt prefix.
+	// It must not start with a comment character (#) or redirection (>) or dot.
+	if trimmedPrefix[0] == '#' || trimmedPrefix[0] == '>' || trimmedPrefix[0] == '.' {
+		return false
+	}
+	for _, b := range trimmedPrefix {
+		if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') {
+			continue
+		}
+		switch b {
+		case '_', '-', '.', '@', ':', '~', '/', '[', ']', '(', ')', '+', ' ':
+			continue
+		default:
+			return false
+		}
+	}
+
+	// If indicator is "$ ", "% ", or "> ", require at least one prompt-specific character
+	// to prevent false positives from commands like "echo $ " or "cat $ " or "git branch $ ".
+	isCommonIndicator := bytes.Equal(tail, []byte("$ ")) || bytes.Equal(tail, []byte("% ")) || bytes.Equal(tail, []byte("> "))
+	if isCommonIndicator {
+		if !bytes.Contains(trimmedPrefix, []byte("@")) && !bytes.Contains(trimmedPrefix, []byte(":")) &&
+			!bytes.Contains(trimmedPrefix, []byte("~")) && !bytes.Contains(trimmedPrefix, []byte("/")) &&
+			!bytes.Contains(trimmedPrefix, []byte("[")) && !bytes.Contains(trimmedPrefix, []byte("]")) &&
+			!bytes.Contains(trimmedPrefix, []byte("(")) && !bytes.Contains(trimmedPrefix, []byte(")")) {
+			return false
+		}
+	}
+
+	// Check if the trimmed prefix contains spaces.
+	if bytes.Contains(trimmedPrefix, []byte(" ")) {
+		// If it contains spaces, it must either:
+		// - start with '(' or '['
+		// - or contain prompt-specific characters: '@', ':', '~', '/', '[', ']'
+		if !bytes.HasPrefix(trimmedPrefix, []byte("(")) && !bytes.HasPrefix(trimmedPrefix, []byte("[")) &&
+			!bytes.Contains(trimmedPrefix, []byte("@")) && !bytes.Contains(trimmedPrefix, []byte(":")) &&
+			!bytes.Contains(trimmedPrefix, []byte("~")) && !bytes.Contains(trimmedPrefix, []byte("/")) &&
+			!bytes.Contains(trimmedPrefix, []byte("[")) && !bytes.Contains(trimmedPrefix, []byte("]")) {
+			return false
+		}
+	}
+	return true
+}
+
+// SplitPrompt checks if line starts with a valid shell prompt prefix.
+// If so, it returns the prompt prefix and the remaining command.
+// Otherwise, it returns nil, nil.
+func SplitPrompt(line []byte) ([]byte, []byte) {
+	for i := 1; i <= len(line); i++ {
+		if IsShellPrompt(line[:i]) {
+			return line[:i], line[i:]
+		}
+	}
+	return nil, nil
+}
+
+
 // Logger writes session output to a file, applying ANSI stripping and a
 // terminal line-buffer simulation so the log is human-readable plain text.
 type Logger struct {
-	file      *os.File
-	rawFile   *os.File // non-nil when KUROKO_RAW_DEBUG=1; receives raw PTY bytes
-	Path      string
-	altScreen bool   // true while a full-screen app (vim/less) owns the terminal
-	seqBuf    []byte // incomplete escape sequence carried across Write calls
-	lineBuf   []byte // current output line being assembled
-	lineCol   int    // cursor column within lineBuf
-	pendingCR bool   // \r was the last control char seen; defer reset until next char
-	savedLine []byte // lineBuf snapshot taken at the first bare \r before any overwrite
-	writeSeq  uint64 // monotonic counter for raw debug chunks
+	file             *os.File
+	rawFile          *os.File // non-nil when KUROKO_RAW_DEBUG=1; receives raw PTY bytes
+	Path             string
+	altScreen        bool   // true while a full-screen app (vim/less) owns the terminal
+	seqBuf           []byte // incomplete escape sequence carried across Write calls
+	lineBuf          []byte // current output line being assembled
+	lineCol          int    // cursor column within lineBuf
+	pendingCR        bool   // \r was the last control char seen; defer reset until next char
+	savedLine        []byte // lineBuf snapshot taken at the first bare \r before any overwrite
+	storedPrompt     []byte // last verified shell prompt; used to recover from readline history contamination
+	writeSeq         uint64 // monotonic counter for raw debug chunks
+	redactionEnabled bool   // true if credentials should be redacted
+	inPEMBlock       bool   // state for tracking multi-line PEM blocks
+	inEsc            bool   // true if currently parsing an ANSI escape sequence
+	escBuf           []byte // buffer for the current escape sequence
 }
 
-func New(logDir string, args []string) (*Logger, error) {
+func New(logDir string, args []string, redactionEnabled bool) (*Logger, error) {
 	filename := generateFilename(args)
 	path := uniquePath(logDir, filename)
 
@@ -147,7 +250,7 @@ func New(logDir string, args []string) (*Logger, error) {
 		return nil, err
 	}
 
-	l := &Logger{file: f, Path: path}
+	l := &Logger{file: f, Path: path, redactionEnabled: redactionEnabled}
 
 	if os.Getenv("KUROKO_RAW_DEBUG") == "1" {
 		rawPath := path + ".raw"
@@ -191,14 +294,12 @@ func (l *Logger) writeFiltered(data []byte) error {
 		if !l.altScreen {
 			idx := bytes.Index(data, enterAltScreen)
 			if idx < 0 {
-				return l.processLine(stripANSI(data))
+				return l.processLine(normalizeLineEndings(data))
 			}
-			if err := l.processLine(stripANSI(data[:idx])); err != nil {
+			if err := l.processLine(normalizeLineEndings(data[:idx])); err != nil {
 				return err
 			}
-			if _, err := l.file.WriteString("[full-screen app active — output suppressed]\n"); err != nil {
-				return err
-			}
+			// Suppress alternate screen output entirely without inserting the warning text.
 			l.altScreen = true
 			data = data[idx+len(enterAltScreen):]
 		} else {
@@ -235,6 +336,22 @@ func (l *Logger) writeFiltered(data []byte) error {
 // produces fewer chars, we commit savedLine so the prompt is preserved.
 func (l *Logger) processLine(data []byte) error {
 	for _, b := range data {
+		if l.inEsc {
+			l.escBuf = append(l.escBuf, b)
+			if isCompleteEscape(l.escBuf) || len(l.escBuf) > 64 {
+				l.inEsc = false
+				if len(l.escBuf) <= 64 {
+					l.processEscape(l.escBuf)
+				}
+			}
+			continue
+		}
+		if b == 0x1b {
+			l.inEsc = true
+			l.escBuf = []byte{b}
+			continue
+		}
+
 		switch b {
 		case '\n':
 			// If pendingCR is set the \r was the CR half of a CRLF pair —
@@ -244,11 +361,49 @@ func (l *Logger) processLine(data []byte) error {
 			if end > len(l.lineBuf) {
 				end = len(l.lineBuf)
 			}
-			// Prefer savedLine when a bare-\r overwrite produced fewer chars
-			// (readline accept-line strips the prompt before executing).
 			out := l.lineBuf[:end:end]
-			if len(l.savedLine) > end {
-				out = l.savedLine
+
+			var hasCommand bool
+
+			// Try to detect and extract the command and prompt.
+			if prompt, cmd := SplitPrompt(out); prompt != nil {
+				// Case 1: The line already starts with a prompt (e.g. no accept-line redraw, or ll).
+				l.storedPrompt = append(l.storedPrompt[:0], prompt...)
+				if len(cmd) > 0 {
+					hasCommand = true
+				}
+			} else if len(l.savedLine) > end {
+				// Accept-line redraw happened.
+				bare := out
+				if len(bare) > 0 {
+					if prompt, cmd := SplitPrompt(l.savedLine); prompt != nil {
+						// Verify if the command in savedLine matches bare, or savedLine is just the prompt.
+						if bytes.Equal(cmd, bare) || len(cmd) == 0 {
+							// Case 2: Prompt + command matches bare command, or savedLine is just the prompt.
+							out = append(append([]byte{}, prompt...), bare...)
+							l.storedPrompt = append(l.storedPrompt[:0], prompt...)
+							hasCommand = true
+						} else if len(l.storedPrompt) > 0 {
+							// Case 3: History contamination (mismatch). Reconstruct from stored prompt.
+							out = append(append([]byte{}, l.storedPrompt...), bare...)
+							hasCommand = true
+						}
+					}
+				} else {
+					out = l.savedLine
+				}
+			}
+
+			if hasCommand {
+				// Write command metadata directly inline before writing the prompt+command.
+				metaLine := fmt.Sprintf("# kuroko:cmd:%s\n", time.Now().Format(time.RFC3339))
+				if _, err := l.file.WriteString(metaLine); err != nil {
+					return err
+				}
+			}
+
+			if l.redactionEnabled {
+				out = l.redact(out)
 			}
 			if _, err := l.file.Write(append(out, '\n')); err != nil {
 				return err
@@ -257,11 +412,6 @@ func (l *Logger) processLine(data []byte) error {
 			l.lineCol = 0
 			l.savedLine = nil
 		case '\r':
-			// Snapshot the current line on the first bare \r so we can
-			// recover it if a subsequent overwrite strips the prompt.
-			if !l.pendingCR && l.lineCol > 0 {
-				l.savedLine = append(l.savedLine[:0], l.lineBuf[:l.lineCol]...)
-			}
 			l.pendingCR = true
 		case '\b':
 			if l.pendingCR {
@@ -276,12 +426,24 @@ func (l *Logger) processLine(data []byte) error {
 				continue // discard other non-printable control bytes
 			}
 			if l.pendingCR {
+				// Snapshot the current lineBuf just before it gets overwritten,
+				// but only if it contains a valid shell prompt.
+				if l.lineCol > 0 {
+					if prompt, _ := SplitPrompt(l.lineBuf[:l.lineCol]); prompt != nil {
+						l.savedLine = append(l.savedLine[:0], l.lineBuf[:l.lineCol]...)
+						l.storedPrompt = append(l.storedPrompt[:0], prompt...)
+					}
+				}
 				l.lineCol = 0
 				l.pendingCR = false
 			}
 			if l.lineCol < len(l.lineBuf) {
 				l.lineBuf[l.lineCol] = b
 			} else {
+				// Pad with spaces if cursor was moved right beyond end of buffer
+				for len(l.lineBuf) < l.lineCol {
+					l.lineBuf = append(l.lineBuf, ' ')
+				}
 				l.lineBuf = append(l.lineBuf, b)
 			}
 			l.lineCol++
@@ -290,17 +452,94 @@ func (l *Logger) processLine(data []byte) error {
 	return nil
 }
 
+func (l *Logger) processEscape(seq []byte) {
+	if len(seq) < 3 || seq[1] != '[' {
+		return // Ignore non-CSI sequences (like OSC title or two-char codes)
+	}
+
+	final := seq[len(seq)-1]
+	paramsStr := string(seq[2 : len(seq)-1])
+
+	// Parse parameter N (default to 1)
+	n := 1
+	if paramsStr != "" {
+		// Clean parameter string from non-digits (like semi-colons or modifiers)
+		var val int
+		var found bool
+		for i := 0; i < len(paramsStr); i++ {
+			c := paramsStr[i]
+			if c >= '0' && c <= '9' {
+				val = val*10 + int(c-'0')
+				found = true
+			} else {
+				if found {
+					break
+				}
+			}
+		}
+		if found && val > 0 {
+			n = val
+		}
+	}
+
+	switch final {
+	case 'K': // Clear line from cursor
+		if len(paramsStr) == 0 || paramsStr == "0" {
+			if l.lineCol < len(l.lineBuf) {
+				l.lineBuf = l.lineBuf[:l.lineCol]
+			}
+		} else if paramsStr == "2" {
+			l.lineBuf = l.lineBuf[:0]
+			l.lineCol = 0
+		}
+	case 'C': // Cursor Forward (Right)
+		l.lineCol += n
+	case 'D': // Cursor Backward (Left)
+		l.lineCol -= n
+		if l.lineCol < 0 {
+			l.lineCol = 0
+		}
+	case 'P': // Delete character(s) at cursor
+		if l.lineCol < len(l.lineBuf) {
+			// Shift remaining characters left by n
+			if l.lineCol+n < len(l.lineBuf) {
+				copy(l.lineBuf[l.lineCol:], l.lineBuf[l.lineCol+n:])
+				l.lineBuf = l.lineBuf[:len(l.lineBuf)-n]
+			} else {
+				l.lineBuf = l.lineBuf[:l.lineCol]
+			}
+		}
+	}
+}
+
+
 func (l *Logger) Close(exitCode int) error {
-	// Flush any unterminated line; prefer savedLine when it is longer.
+	// Flush any unterminated line; apply the same savedLine validation as processLine.
 	end := l.lineCol
 	if end > len(l.lineBuf) {
 		end = len(l.lineBuf)
 	}
 	out := l.lineBuf[:end]
-	if len(l.savedLine) > end {
-		out = l.savedLine
+	if prompt, _ := SplitPrompt(out); prompt != nil {
+		// Already has prompt.
+	} else if len(l.savedLine) > end {
+		bare := out
+		if len(bare) > 0 {
+			if prompt, cmd := SplitPrompt(l.savedLine); prompt != nil {
+				if bytes.Equal(cmd, bare) || len(cmd) == 0 {
+					out = append(append([]byte{}, prompt...), bare...)
+				} else if len(l.storedPrompt) > 0 {
+					out = append(append([]byte{}, l.storedPrompt...), bare...)
+				}
+			}
+		} else {
+			out = l.savedLine
+		}
 	}
 	if len(out) > 0 {
+		if l.redactionEnabled {
+			out = l.redact(out)
+		}
 		l.file.Write(out)
 		l.file.WriteString("\n")
 	}
@@ -316,8 +555,11 @@ func (l *Logger) Close(exitCode int) error {
 		l.rawFile.Close()
 		l.rawFile = nil
 	}
+
 	return l.file.Close()
 }
+
+
 
 // uniquePath returns path unchanged if it does not exist, otherwise appends _1, _2, …
 func uniquePath(dir, filename string) string {
@@ -441,4 +683,188 @@ func sanitize(s string) string {
 		"*", "_", "?", "_", "\"", "_", "<", "_", ">", "_", "|", "_",
 	)
 	return r.Replace(s)
+}
+
+// CompressFile compresses the file at srcPath using gzip, deletes the original file,
+// and returns the path to the compressed file (.gz).
+func CompressFile(srcPath string) (string, error) {
+	dstPath := srcPath + ".gz"
+
+	srcFile, err := os.Open(srcPath)
+	if err != nil {
+		return "", err
+	}
+	defer srcFile.Close()
+
+	dstFile, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return "", err
+	}
+	defer dstFile.Close()
+
+	gzWriter := gzip.NewWriter(dstFile)
+	defer gzWriter.Close()
+
+	if _, err := io.Copy(gzWriter, srcFile); err != nil {
+		return "", err
+	}
+
+	// Close files explicitly before deleting the source
+	gzWriter.Close()
+	dstFile.Close()
+	srcFile.Close()
+
+	if err := os.Remove(srcPath); err != nil {
+		return "", err
+	}
+
+	return dstPath, nil
+}
+
+// RotateLogs scans the logDir and removes old logs based on age and total directory size.
+func RotateLogs(logDir string, maxAgeDays int, maxTotalSizeMB int) error {
+	entries, err := os.ReadDir(logDir)
+	if err != nil {
+		return err
+	}
+
+	type fileInfo struct {
+		path    string
+		size    int64
+		modTime time.Time
+	}
+
+	var files []fileInfo
+	now := time.Now()
+	maxAge := time.Duration(maxAgeDays) * 24 * time.Hour
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		// Only rotate .log or .log.gz files
+		if !strings.HasSuffix(name, ".log") && !strings.HasSuffix(name, ".log.gz") {
+			continue
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+
+		path := filepath.Join(logDir, name)
+		modTime := info.ModTime()
+
+		// 1. Remove files older than maxAgeDays
+		if maxAgeDays > 0 && now.Sub(modTime) > maxAge {
+			_ = os.Remove(path)
+			continue
+		}
+
+		files = append(files, fileInfo{
+			path:    path,
+			size:    info.Size(),
+			modTime: modTime,
+		})
+	}
+
+	if maxTotalSizeMB <= 0 {
+		return nil
+	}
+
+	// Calculate total size and check if it exceeds the limit
+	var totalSize int64
+	for _, f := range files {
+		totalSize += f.size
+	}
+
+	maxTotalSizeBytes := int64(maxTotalSizeMB) * 1024 * 1024
+	if totalSize <= maxTotalSizeBytes {
+		return nil
+	}
+
+	// 2. Sort by modTime (oldest first) and delete until total size is within the limit
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].modTime.Before(files[j].modTime)
+	})
+
+	for _, f := range files {
+		if totalSize <= maxTotalSizeBytes {
+			break
+		}
+		if err := os.Remove(f.path); err == nil {
+			totalSize -= f.size
+		}
+	}
+
+	return nil
+}
+
+var (
+	awsAccessKeyPattern = regexp.MustCompile(`AKIA[0-9A-Z]{16}`)
+	awsSecretKeyPattern = regexp.MustCompile(`(?i)(aws_secret_access_key|secret_key|secret)\s*[:=]\s*["']?([A-Za-z0-9/+=]{40})["']?`)
+	bearerTokenPattern  = regexp.MustCompile(`(?i)Bearer\s+([a-zA-Z0-9_\-\.\+\/\\=]+)`)
+	sqlPasswordPattern  = regexp.MustCompile(`(?i)identified\s+by\s+'([^']+)'`)
+)
+
+func (l *Logger) redact(line []byte) []byte {
+	if !l.redactionEnabled {
+		return line
+	}
+
+	lineStr := string(line)
+
+	// Stateful PEM Block redaction
+	if strings.Contains(lineStr, "-----BEGIN") && strings.Contains(lineStr, "PRIVATE KEY-----") {
+		l.inPEMBlock = true
+		return []byte("[PEM PRIVATE KEY BLOCK STARTED - REDACTED]")
+	}
+	if l.inPEMBlock {
+		if strings.Contains(lineStr, "-----END") && strings.Contains(lineStr, "PRIVATE KEY-----") {
+			l.inPEMBlock = false
+			return []byte("[PEM PRIVATE KEY BLOCK ENDED - REDACTED]")
+		}
+		return []byte("[PEM PRIVATE KEY DATA - REDACTED]")
+	}
+
+	// AWS Access Key ID
+	line = awsAccessKeyPattern.ReplaceAll(line, []byte("[AWS_ACCESS_KEY_REDACTED]"))
+
+	// AWS Secret Access Key
+	line = awsSecretKeyPattern.ReplaceAllFunc(line, func(match []byte) []byte {
+		parts := awsSecretKeyPattern.FindSubmatch(match)
+		if len(parts) > 2 {
+			secret := parts[2]
+			return bytes.Replace(match, secret, []byte("[AWS_SECRET_KEY_REDACTED]"), 1)
+		}
+		return match
+	})
+
+	// Bearer Token
+	line = bearerTokenPattern.ReplaceAllFunc(line, func(match []byte) []byte {
+		parts := bearerTokenPattern.FindSubmatch(match)
+		if len(parts) > 1 {
+			token := parts[1]
+			return bytes.Replace(match, token, []byte("[TOKEN_REDACTED]"), 1)
+		}
+		return match
+	})
+
+	// SQL Password
+	line = sqlPasswordPattern.ReplaceAllFunc(line, func(match []byte) []byte {
+		parts := sqlPasswordPattern.FindSubmatch(match)
+		if len(parts) > 1 {
+			pass := parts[1]
+			return bytes.Replace(match, pass, []byte("[PASSWORD_REDACTED]"), 1)
+		}
+		return match
+	})
+
+	return line
+}
+
+// InAltScreen returns true if a full-screen application (like vim) is active.
+func (l *Logger) InAltScreen() bool {
+	return l.altScreen
 }
