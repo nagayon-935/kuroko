@@ -3,6 +3,7 @@ package logger
 import (
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -979,6 +980,344 @@ func TestLoggerEscapeSequences(t *testing.T) {
 		t.Errorf("expected metadata line for vim, got:\n%s", content)
 	}
 }
+
+// TestInAltScreen verifies the InAltScreen() accessor reflects alt-screen state.
+func TestInAltScreen(t *testing.T) {
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host"}, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer l.Close(0)
+
+	if l.InAltScreen() {
+		t.Error("InAltScreen() should be false initially")
+	}
+	l.Write([]byte("\x1b[?1049h"))
+	if !l.InAltScreen() {
+		t.Error("InAltScreen() should be true after entering alt screen")
+	}
+	l.Write([]byte("\x1b[?1049l"))
+	if l.InAltScreen() {
+		t.Error("InAltScreen() should be false after exiting alt screen")
+	}
+}
+
+// TestIsCompleteEscape covers OSC-terminated and two-char escape sequence detection.
+func TestIsCompleteEscape(t *testing.T) {
+	tests := []struct {
+		name string
+		seq  []byte
+		want bool
+	}{
+		{"OSC with BEL",       []byte("\x1b]0;title\x07"),    true},
+		{"OSC with ESC ST",    []byte("\x1b]0;title\x1b\\"),  true},
+		{"OSC incomplete",     []byte("\x1b]0;title"),         false},
+		{"two-char ESC M",     []byte("\x1bM"),                true},
+		{"two-char only ESC",  []byte("\x1b"),                 false},
+		{"CSI complete",       []byte("\x1b[2J"),              true},
+		{"CSI incomplete",     []byte("\x1b[2"),               false},
+		{"empty",              []byte{},                       false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isCompleteEscape(tt.seq)
+			if got != tt.want {
+				t.Errorf("isCompleteEscape(%q) = %v, want %v", tt.seq, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestLoggerCursorMovement covers ESC[C (cursor forward) and ESC[D (cursor backward).
+func TestLoggerCursorMovement(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		want        string
+		wantAbsent  string
+	}{
+		{
+			name:  "cursor forward then overwrite",
+			// "hello", back 3 (col=2), forward 1 (col=3), write "XY" → "helXY"
+			input: "hello\x1b[3D\x1b[1CXY\n",
+			want:  "helXY",
+		},
+		{
+			name: "cursor backward negative clamp",
+			// "hi" (lineCol=2), back 99 → clamped to 0, write 'X' at 0 (lineCol=1),
+			// '\n' commits lineBuf[:lineCol=1] = "X".  The 'i' tail must not appear.
+			input:      "hi\x1b[99DX\n",
+			want:       "X",
+			wantAbsent: "Xi",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			l, err := New(tmp, []string{"ssh", "host"}, false)
+			if err != nil {
+				t.Fatalf("New() error: %v", err)
+			}
+			l.Write([]byte(tt.input))
+			l.Close(0)
+
+			data, err := os.ReadFile(l.Path)
+			if err != nil {
+				t.Fatalf("ReadFile %s: %v", l.Path, err)
+			}
+			content := string(data)
+			if !strings.Contains(content, tt.want) {
+				t.Errorf("expected %q in log, got:\n%s", tt.want, content)
+			}
+			if tt.wantAbsent != "" && strings.Contains(content, tt.wantAbsent) {
+				t.Errorf("expected %q to be absent from log, got:\n%s", tt.wantAbsent, content)
+			}
+		})
+	}
+}
+
+// TestLoggerDeleteChars covers ESC[P (delete character at cursor position).
+func TestLoggerDeleteChars(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name: "delete one char mid-line",
+			// "hello world" (11 chars, lineCol=11), back 5 → lineCol=6 ('w'),
+			// delete 1 → lineBuf="hello orld" (10 chars), forward 4 → lineCol=10,
+			// '\n' commits lineBuf[:10]="hello orld"
+			input: "hello world\x1b[5D\x1b[1P\x1b[4C\n",
+			want:  "hello orld",
+		},
+		{
+			name:  "delete beyond end truncates to cursor",
+			// "hello world" (11 chars), back 5 → col=6, delete 99 → lineBuf[:6] = "hello "
+			input: "hello world\x1b[5D\x1b[99P\n",
+			want:  "hello ",
+		},
+		{
+			name:  "delete at end is no-op",
+			// "hello", lineCol=5 == len → condition false, no change
+			input: "hello\x1b[1P\n",
+			want:  "hello",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			l, err := New(tmp, []string{"ssh", "host"}, false)
+			if err != nil {
+				t.Fatalf("New() error: %v", err)
+			}
+			l.Write([]byte(tt.input))
+			l.Close(0)
+
+			data, err := os.ReadFile(l.Path)
+			if err != nil {
+				t.Fatalf("ReadFile %s: %v", l.Path, err)
+			}
+			if !strings.Contains(string(data), tt.want) {
+				t.Errorf("expected %q in log, got:\n%s", tt.want, string(data))
+			}
+		})
+	}
+}
+
+// TestLoggerProcessLineBehaviors is a table-driven test covering ESC[2K, non-CSI
+// escape ignore, backspace-after-CR, space padding, and control byte discard.
+func TestLoggerProcessLineBehaviors(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		want   []string
+		absent []string
+	}{
+		{
+			name:   "ESC[2K clears entire line",
+			input:  "hello\x1b[2Kworld\n",
+			want:   []string{"world"},
+			absent: []string{"hello"},
+		},
+		{
+			name:  "non-CSI two-char escape ignored",
+			// ESC+M is "Reverse Index" — processEscape returns early, surrounding text survives.
+			input: "hello\x1bMworld\n",
+			want:  []string{"helloworld"},
+		},
+		{
+			name: "backspace after pendingCR resets col to 0",
+			// "hello"\r sets pendingCR; \b clears it and resets lineCol=0 (no decrement
+			// since 0 > 0 is false); "world" writes from col 0 → commits "world".
+			input: "hello\r\bworld\n",
+			want:  []string{"world"},
+		},
+		{
+			name: "cursor-forward pads lineBuf with spaces",
+			// "hi" (lineCol=2), ESC[5C → lineCol=7, 'X' triggers 5-space pad → "hi     X"
+			input: "hi\x1b[5CX\n",
+			want:  []string{"hi     X"},
+		},
+		{
+			name:  "control byte below 0x20 discarded",
+			input: "he\x01llo\n",
+			want:  []string{"hello"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			l, err := New(tmp, []string{"ssh", "host"}, false)
+			if err != nil {
+				t.Fatalf("New() error: %v", err)
+			}
+			l.Write([]byte(tt.input))
+			l.Close(0)
+
+			data, err := os.ReadFile(l.Path)
+			if err != nil {
+				t.Fatalf("ReadFile %s: %v", l.Path, err)
+			}
+			content := string(data)
+			for _, w := range tt.want {
+				if !strings.Contains(content, w) {
+					t.Errorf("expected %q in log, got:\n%s", w, content)
+				}
+			}
+			for _, a := range tt.absent {
+				if strings.Contains(content, a) {
+					t.Errorf("expected %q absent from log, got:\n%s", a, content)
+				}
+			}
+		})
+	}
+}
+
+// TestLoggerRawDebug verifies that KUROKO_RAW_DEBUG=1 creates a .raw sidecar file.
+func TestLoggerRawDebug(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("KUROKO_RAW_DEBUG", "1")
+
+	l, err := New(tmp, []string{"ssh", "host"}, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	l.Write([]byte("hello\n"))
+	l.Close(0)
+
+	rawPath := l.Path + ".raw"
+	if _, err := os.Stat(rawPath); errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("raw debug file %s should exist", rawPath)
+	}
+	raw, err := os.ReadFile(rawPath)
+	if err != nil {
+		t.Fatalf("ReadFile %s: %v", rawPath, err)
+	}
+	if !strings.Contains(string(raw), "=== write 1") {
+		t.Errorf("raw file should contain write entries, got:\n%s", string(raw))
+	}
+}
+
+// TestCloseUnterminatedSavedLine tests that Close() restores savedLine when a
+// session ends mid-line after an accept-line overwrite (Case 2).
+func TestCloseUnterminatedSavedLine(t *testing.T) {
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host"}, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// Build prompt+command in lineBuf, then trigger accept-line \r so savedLine
+	// is captured, but never write the terminating \n.
+	l.Write([]byte("user@host:~$ cat file.txt"))
+	l.Write([]byte("\rcat file.txt")) // savedLine = "user@host:~$ cat file.txt"
+	// Close with unterminated line — Close() must use savedLine.
+	l.Close(0)
+
+	data, err := os.ReadFile(l.Path)
+	if err != nil {
+		t.Fatalf("ReadFile %s: %v", l.Path, err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "user@host:~$ cat file.txt") {
+		t.Errorf("Close should restore savedLine for unterminated line, got:\n%s", content)
+	}
+}
+
+// TestCloseHistoryContaminationSavedLine tests that Close() falls back to
+// storedPrompt when savedLine contains a mismatched command (Case 3).
+func TestCloseHistoryContaminationSavedLine(t *testing.T) {
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host"}, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// Step 1: clean "ll" establishes storedPrompt.
+	l.Write([]byte("user@host:~$ ll\r\r\n"))
+	l.Write([]byte("total 0\n"))
+
+	// Step 2: history contamination — savedLine carries "cat foo" but the bare
+	// command (what user actually ran) is "vim foo".  Close() must reconstruct
+	// using storedPrompt + bare instead of the contaminated savedLine.
+	l.Write([]byte("user@host:~$ cat foo")) // contamination in lineBuf
+	l.Write([]byte("\r"))                   // accept-line \r: savedLine = "user@host:~$ cat foo"
+	l.Write([]byte("vim foo"))             // bare cmd overwrites from col 0
+	// No \n — Close() handles the unterminated line.
+	l.Close(0)
+
+	data, err := os.ReadFile(l.Path)
+	if err != nil {
+		t.Fatalf("ReadFile %s: %v", l.Path, err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "user@host:~$ vim foo") {
+		t.Errorf("Close should reconstruct prompt using storedPrompt, got:\n%s", content)
+	}
+	if strings.Contains(content, "user@host:~$ cat foo") {
+		t.Errorf("contaminated cat cmd must not appear in log, got:\n%s", content)
+	}
+}
+
+// TestCloseCursorPastEnd tests that Close() handles lineCol > len(lineBuf) gracefully.
+func TestCloseCursorPastEnd(t *testing.T) {
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host"}, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// Move cursor 99 columns right beyond "hi" — lineCol becomes 101, lineBuf len=2.
+	// Close() must clamp end to len(lineBuf) = 2 and write "hi".
+	l.Write([]byte("hi\x1b[99C"))
+	l.Close(0)
+
+	data, err := os.ReadFile(l.Path)
+	if err != nil {
+		t.Fatalf("ReadFile %s: %v", l.Path, err)
+	}
+	if !strings.Contains(string(data), "hi") {
+		t.Errorf("expected 'hi' in log when cursor past end, got:\n%s", string(data))
+	}
+}
+
+// TestIsShellPromptArrow tests the ➔ multi-byte prompt indicator.
+func TestIsShellPromptArrow(t *testing.T) {
+	valid := [][]byte{
+		[]byte("user@host ➔ "),
+		[]byte("➔ "),
+	}
+	for _, p := range valid {
+		if !IsShellPrompt(p) {
+			t.Errorf("IsShellPrompt(%q) should be true", string(p))
+		}
+	}
+}
+
+// TestLoggerBackspacePendingCR covers the pendingCR + backspace code path which
+// resets lineCol to 0 and clears pendingCR before processing the backspace.
 
 
 
