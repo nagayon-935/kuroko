@@ -339,18 +339,143 @@ func TestSelectorScanAndFilter(t *testing.T) {
 }
 
 func TestHighlightQuery(t *testing.T) {
-	line := "Hello World"
-	query := "world"
-	res := highlightQuery(line, query, false)
+	tests := []struct {
+		name     string
+		line     string
+		query    string
+		isActive bool
+		want     string
+	}{
+		{"empty query", "hello", "", false, "hello"},
+		{"active match", "Hello World", "world", true, "Hello \x1b[30;42mWorld\x1b[0m"},
+		{"inactive match", "Hello World", "world", false, "Hello \x1b[30;43mWorld\x1b[0m"},
+		{"no match", "hello world", "xyz", false, "hello world"},
+		{"multiple occurrences", "file1 file2", "file", false,
+			"\x1b[30;43mfile\x1b[0m1 \x1b[30;43mfile\x1b[0m2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := highlightQuery(tt.line, tt.query, tt.isActive)
+			if got != tt.want {
+				t.Errorf("highlightQuery(%q, %q, %v) = %q; want %q",
+					tt.line, tt.query, tt.isActive, got, tt.want)
+			}
+		})
+	}
+}
 
-	expected := "Hello \x1b[30;43mWorld\x1b[0m"
-	if res != expected {
-		t.Errorf("expected %q, got %q", expected, res)
+func TestScrollToLineBranches(t *testing.T) {
+	lines := make([]string, 100)
+	v := &Viewer{currentOutputLines: lines}
+	bodyHeight := 20
+
+	// targetLine < 0: no-op
+	v.outputScroll = 5
+	v.scrollToLine(-1, bodyHeight)
+	if v.outputScroll != 5 {
+		t.Errorf("negative target: scroll = %d; want 5", v.outputScroll)
 	}
 
-	resActive := highlightQuery(line, query, true)
-	expectedActive := "Hello \x1b[30;42mWorld\x1b[0m"
-	if resActive != expectedActive {
-		t.Errorf("expected %q, got %q", expectedActive, resActive)
+	// targetLine >= len(currentOutputLines): no-op
+	v.outputScroll = 5
+	v.scrollToLine(100, bodyHeight)
+	if v.outputScroll != 5 {
+		t.Errorf("out-of-range target: scroll = %d; want 5", v.outputScroll)
 	}
+
+	// targetLine in visible window [scroll, scroll+bodyHeight): no change
+	v.outputScroll = 10
+	v.scrollToLine(15, bodyHeight)
+	if v.outputScroll != 10 {
+		t.Errorf("in-range target: scroll = %d; want 10", v.outputScroll)
+	}
+
+	// targetLine before visible window: scroll back (result < 0 → clamped to 0)
+	v.outputScroll = 30
+	v.scrollToLine(2, bodyHeight)
+	// 2 - (20/2) = -8 → clamped to 0
+	if v.outputScroll != 0 {
+		t.Errorf("before-range clamp: scroll = %d; want 0", v.outputScroll)
+	}
+
+	// targetLine after visible window: scroll forward
+	v.outputScroll = 0
+	v.scrollToLine(50, bodyHeight)
+	// 50 - (20/2) = 40
+	if v.outputScroll != 40 {
+		t.Errorf("after-range: scroll = %d; want 40", v.outputScroll)
+	}
+}
+
+func TestUpdateMatchesNoMatch(t *testing.T) {
+	v := &Viewer{
+		currentOutputLines: []string{"hello", "world"},
+		activeMatch:        0,
+	}
+	// Non-empty query that matches nothing → activeMatch = -1
+	v.outputQuery = "xyzzy_nomatch"
+	v.updateMatches()
+	if len(v.matchLines) != 0 {
+		t.Errorf("no-match: len(matchLines) = %d; want 0", len(v.matchLines))
+	}
+	if v.activeMatch != -1 {
+		t.Errorf("no-match: activeMatch = %d; want -1", v.activeMatch)
+	}
+}
+
+// TestViewerDrawOutputPane exercises the PaneOutput branch in draw():
+// highlighted border and output-pane footer (no matches).
+func TestViewerDrawOutputPane(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "test.log")
+	if err := os.WriteFile(logPath, []byte(testLogContent), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	v, err := newViewer(logPath)
+	if err != nil {
+		t.Fatalf("newViewer(): %v", err)
+	}
+	v.activePane = PaneOutput
+	v.draw()
+}
+
+// TestViewerDrawWithMatches exercises the match-count footer and highlightQuery
+// paths (active + non-active) when outputQuery has multiple hits.
+func TestViewerDrawWithMatches(t *testing.T) {
+	// Build log content where two output lines both match the query.
+	content := "# kuroko:cmd:2026-06-18T12:00:01+09:00\nuser@host:~$ ls\nfile1.txt\nfile2.txt\n"
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "multi.log")
+	if err := os.WriteFile(logPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	v, err := newViewer(logPath)
+	if err != nil {
+		t.Fatalf("newViewer(): %v", err)
+	}
+	v.activePane = PaneOutput
+	v.outputQuery = "file"
+	v.updateMatches()
+	// Two matches: activeMatch=0 (active), matchLines[1] (non-active)
+	if len(v.matchLines) < 2 {
+		t.Skipf("expected ≥2 matches for 'file', got %d — skipping draw test", len(v.matchLines))
+	}
+	v.draw()
+}
+
+// TestViewerDrawSearchOutputMode exercises the "Find in output" footer branch.
+func TestViewerDrawSearchOutputMode(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "test.log")
+	if err := os.WriteFile(logPath, []byte(testLogContent), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	v, err := newViewer(logPath)
+	if err != nil {
+		t.Fatalf("newViewer(): %v", err)
+	}
+	v.inSearch = true
+	v.searchMode = SearchOutput
+	v.searchQuery = "file"
+	v.draw()
 }
