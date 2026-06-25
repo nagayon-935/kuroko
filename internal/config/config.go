@@ -11,7 +11,21 @@ type Config struct {
 	LogDir    string          `json:"log_dir"`
 	Notifier  NotifierConfig  `json:"notifier"`
 	Storage   StorageConfig   `json:"storage"`
-	Redaction RedactionConfig  `json:"redaction"`
+	Redaction RedactionConfig `json:"redaction"`
+	Banner BannerConfig `json:"banner"`
+}
+
+// BannerConfig controls the session-start banner shown on stderr.
+type BannerConfig struct {
+	Enabled bool         `json:"enabled"` // default true
+	Rules   []BannerRule `json:"rules"`
+}
+
+// BannerRule maps a target substring pattern to a label and color.
+type BannerRule struct {
+	Match string `json:"match"` // substring of target name (case-insensitive)
+	Label string `json:"label"` // e.g. "PRODUCTION"
+	Color string `json:"color"` // "red","yellow","green","cyan","blue","magenta"
 }
 
 type NotifierConfig struct {
@@ -66,6 +80,9 @@ func Load(opt Options) (*Config, error) {
 		},
 		Redaction: RedactionConfig{
 			Enabled: false,
+		},
+		Banner: BannerConfig{
+			Enabled: true,
 		},
 	}
 

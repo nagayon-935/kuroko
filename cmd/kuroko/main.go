@@ -80,16 +80,12 @@ func main() {
 		fmt.Print(usage)
 		os.Exit(0)
 	case "logs":
-		if len(rest) == 1 {
-			cfg, err := config.Load(config.Options{LogDir: logDir})
-			if err != nil {
-				fatalf("config error: %v", err)
-			}
-			if err := viewer.RunSelector(cfg); err != nil {
-				fatalf("selector error: %v", err)
-			}
-		} else {
-			showLogs(config.Options{LogDir: logDir})
+		cfg, err := config.Load(config.Options{LogDir: logDir})
+		if err != nil {
+			fatalf("config error: %v", err)
+		}
+		if err := viewer.RunSelector(cfg); err != nil {
+			fatalf("selector error: %v", err)
 		}
 		os.Exit(0)
 	case "view":
@@ -119,27 +115,6 @@ func main() {
 	os.Exit(exitCode)
 }
 
-func showLogs(opt config.Options) {
-	cfg, err := config.Load(opt)
-	if err != nil {
-		fatalf("config error: %v", err)
-	}
-
-	entries, err := os.ReadDir(cfg.LogDir)
-	if err != nil {
-		fatalf("reading log dir: %v", err)
-	}
-	if len(entries) == 0 {
-		fmt.Printf("No logs in %s\n", cfg.LogDir)
-		return
-	}
-
-	fmt.Printf("Logs in %s:\n\n", cfg.LogDir)
-	for _, e := range entries {
-		info, _ := e.Info()
-		fmt.Printf("  %-50s  %s\n", e.Name(), info.ModTime().Format("2006-01-02 15:04:05"))
-	}
-}
 
 func fatalf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "\033[31m[kuroko] "+format+"\033[0m\n", args...)

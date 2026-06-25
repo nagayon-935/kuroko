@@ -228,6 +228,7 @@ type Logger struct {
 	inPEMBlock       bool   // state for tracking multi-line PEM blocks
 	inEsc            bool   // true if currently parsing an ANSI escape sequence
 	escBuf           []byte // buffer for the current escape sequence
+	networkMode      bool   // true when wrapping a NW device session (ssh/telnet/screen/…)
 }
 
 func New(logDir string, args []string, redactionEnabled bool) (*Logger, error) {
@@ -250,7 +251,12 @@ func New(logDir string, args []string, redactionEnabled bool) (*Logger, error) {
 		return nil, err
 	}
 
-	l := &Logger{file: f, Path: path, redactionEnabled: redactionEnabled}
+	l := &Logger{
+		file:             f,
+		Path:             path,
+		redactionEnabled: redactionEnabled,
+		networkMode:      isNetworkSessionCommand(args),
+	}
 
 	if os.Getenv("KUROKO_RAW_DEBUG") == "1" {
 		rawPath := path + ".raw"
@@ -379,12 +385,24 @@ func (l *Logger) processLine(data []byte) error {
 
 			// Try to detect and extract the command and prompt.
 			if prompt, cmd := SplitPrompt(out); prompt != nil {
-				// Case 1: The line already starts with a prompt (e.g. no accept-line redraw, or ll).
+				// Case 1: Shell prompt (bash/zsh/…).
 				l.storedPrompt = append(l.storedPrompt[:0], prompt...)
 				if len(cmd) > 0 {
 					hasCommand = true
 				}
-			} else if len(l.savedLine) > end {
+			} else if l.networkMode {
+				// Case 1b: Network device prompt (Cisco/Arista/Juniper/…).
+				// NW devices do not perform readline accept-line redraws, so we
+				// detect the prompt directly from the committed line.
+				if prompt, cmd, info := SplitPromptInfo(out); info.Kind != KindNone && info.Kind != KindShell {
+					l.storedPrompt = append(l.storedPrompt[:0], prompt...)
+					if len(cmd) > 0 {
+						hasCommand = true
+					}
+					_ = cmd // cmd content already in out; variable used for hasCommand only
+				}
+			}
+			if !hasCommand && len(l.savedLine) > end {
 				// Accept-line redraw happened.
 				bare := out
 				if len(bare) > 0 {
@@ -589,6 +607,43 @@ func uniquePath(dir, filename string) string {
 	}
 }
 
+// TargetName returns the human-readable target name for the given command
+// arguments (e.g. hostname for ssh, device for screen, command name otherwise).
+// Used by log filename generation.
+func TargetName(args []string) string {
+	_, hostname := TargetDetails(args)
+	return hostname
+}
+
+// TargetDetails returns two values:
+//   - address: full connection target as typed (e.g. "admin@router-a")
+//   - hostname: resolved canonical hostname (e.g. "router-a.dc1.example.jp")
+//
+// For non-SSH commands both values are identical.
+// The banner uses both values so operators see what they typed AND the resolved host.
+func TargetDetails(args []string) (address, hostname string) {
+	if len(args) == 0 {
+		return "", ""
+	}
+	cmd := args[0]
+	switch cmd {
+	case "ssh":
+		raw := extractSSHTarget(args[1:])  // user@host as typed
+		resolved := resolveSSHHostname(raw) // may resolve SSH config alias
+		// hostname is the bare host part of the resolved target
+		h := resolved
+		if idx := strings.LastIndex(h, "@"); idx >= 0 {
+			h = h[idx+1:]
+		}
+		return raw, h
+	case "screen":
+		t := extractScreenTarget(args[1:])
+		return t, t
+	default:
+		return cmd, cmd
+	}
+}
+
 func generateFilename(args []string) string {
 	ts := time.Now().Format("20060102_150405")
 	if len(args) == 0 {
@@ -596,27 +651,17 @@ func generateFilename(args []string) string {
 	}
 
 	cmd := args[0]
-	var target string
-
-	switch cmd {
-	case "ssh":
-		raw := extractSSHTarget(args[1:])
-		resolved := resolveSSHHostname(raw)
-		if idx := strings.LastIndex(resolved, "@"); idx >= 0 {
-			target = resolved[idx+1:]
-		} else {
-			target = resolved
-		}
-	case "screen":
-		target = extractScreenTarget(args[1:])
-	default:
-		if len(args) > 1 {
-			target = sanitize(args[1])
-		}
+	// Use the typed host (address without user@) as the filename component so
+	// SSH aliases like "edgeSW03" are preserved instead of being replaced by
+	// the resolved IP from ssh -G.
+	address, _ := TargetDetails(args)
+	host := address
+	if idx := strings.LastIndex(host, "@"); idx >= 0 {
+		host = host[idx+1:]
 	}
 
-	if target != "" {
-		return fmt.Sprintf("%s_%s_%s.log", ts, cmd, sanitize(target))
+	if host != "" && host != cmd {
+		return fmt.Sprintf("%s_%s_%s.log", ts, cmd, sanitize(host))
 	}
 	return fmt.Sprintf("%s_%s.log", ts, sanitize(cmd))
 }
