@@ -317,8 +317,9 @@ func (v *Viewer) loop() error {
 							v.updateOutput()
 						}
 					} else if x > leftWidth+1 {
-						if v.outputScroll > 0 {
-							v.outputScroll--
+						v.outputScroll -= 3
+						if v.outputScroll < 0 {
+							v.outputScroll = 0
 						}
 					}
 				} else if btn == 65 { // Scroll Down
@@ -328,8 +329,12 @@ func (v *Viewer) loop() error {
 							v.updateOutput()
 						}
 					} else if x > leftWidth+1 {
-						if v.outputScroll < len(v.currentOutputLines)-bodyHeight {
-							v.outputScroll++
+						v.outputScroll += 3
+						if v.outputScroll > len(v.currentOutputLines)-bodyHeight {
+							v.outputScroll = len(v.currentOutputLines) - bodyHeight
+						}
+						if v.outputScroll < 0 {
+							v.outputScroll = 0
 						}
 					}
 				} else if btn == 0 { // Left click press
@@ -439,8 +444,12 @@ func (v *Viewer) loop() error {
 						if bodyHeight < 1 {
 							bodyHeight = 1
 						}
-						if v.outputScroll < len(v.currentOutputLines)-bodyHeight {
-							v.outputScroll++
+						v.outputScroll += 3
+						if v.outputScroll > len(v.currentOutputLines)-bodyHeight {
+							v.outputScroll = len(v.currentOutputLines) - bodyHeight
+						}
+						if v.outputScroll < 0 {
+							v.outputScroll = 0
 						}
 					}
 				case 'k': // up
@@ -451,8 +460,9 @@ func (v *Viewer) loop() error {
 							v.outputScroll = 0
 						}
 					} else {
-						if v.outputScroll > 0 {
-							v.outputScroll--
+						v.outputScroll -= 3
+						if v.outputScroll < 0 {
+							v.outputScroll = 0
 						}
 					}
 				case 4: // Ctrl+D
@@ -521,8 +531,9 @@ func (v *Viewer) loop() error {
 							v.outputScroll = 0
 						}
 					} else {
-						if v.outputScroll > 0 {
-							v.outputScroll--
+						v.outputScroll -= 3
+						if v.outputScroll < 0 {
+							v.outputScroll = 0
 						}
 					}
 				case 'B': // Down arrow
@@ -537,8 +548,12 @@ func (v *Viewer) loop() error {
 						if bodyHeight < 1 {
 							bodyHeight = 1
 						}
-						if v.outputScroll < len(v.currentOutputLines)-bodyHeight {
-							v.outputScroll++
+						v.outputScroll += 3
+						if v.outputScroll > len(v.currentOutputLines)-bodyHeight {
+							v.outputScroll = len(v.currentOutputLines) - bodyHeight
+						}
+						if v.outputScroll < 0 {
+							v.outputScroll = 0
 						}
 					}
 				case 'C': // Right arrow

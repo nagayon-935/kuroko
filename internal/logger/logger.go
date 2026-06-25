@@ -651,10 +651,17 @@ func generateFilename(args []string) string {
 	}
 
 	cmd := args[0]
-	target := TargetName(args)
+	// Use the typed host (address without user@) as the filename component so
+	// SSH aliases like "edgeSW03" are preserved instead of being replaced by
+	// the resolved IP from ssh -G.
+	address, _ := TargetDetails(args)
+	host := address
+	if idx := strings.LastIndex(host, "@"); idx >= 0 {
+		host = host[idx+1:]
+	}
 
-	if target != "" && target != cmd {
-		return fmt.Sprintf("%s_%s_%s.log", ts, cmd, sanitize(target))
+	if host != "" && host != cmd {
+		return fmt.Sprintf("%s_%s_%s.log", ts, cmd, sanitize(host))
 	}
 	return fmt.Sprintf("%s_%s.log", ts, sanitize(cmd))
 }

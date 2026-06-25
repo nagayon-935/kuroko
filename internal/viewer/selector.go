@@ -28,6 +28,7 @@ type LogSelector struct {
 	selected    int
 	searchQuery string
 	inSearch    bool
+	sortDesc    bool // true = newest first (default), false = oldest first
 	width       int
 	height      int
 }
@@ -42,7 +43,8 @@ func RunSelector(cfg *config.Config) error {
 
 func newSelector(logDir string) (*LogSelector, error) {
 	s := &LogSelector{
-		logDir: logDir,
+		logDir:   logDir,
+		sortDesc: true, // newest first by default
 	}
 	if err := s.scanLogs(); err != nil {
 		return nil, err
@@ -79,13 +81,25 @@ func (s *LogSelector) scanLogs() error {
 		})
 	}
 
-	// Sort by modTime desc (newest first)
-	sort.Slice(items, func(i, j int) bool {
-		return items[i].modTime.After(items[j].modTime)
-	})
-
 	s.items = items
+	s.applySortOrder(s.items)
 	return nil
+}
+
+func (s *LogSelector) applySortOrder(items []selectorItem) {
+	sort.Slice(items, func(i, j int) bool {
+		if s.sortDesc {
+			return items[i].modTime.After(items[j].modTime)
+		}
+		return items[i].modTime.Before(items[j].modTime)
+	})
+}
+
+func (s *LogSelector) toggleSort() {
+	s.sortDesc = !s.sortDesc
+	s.applySortOrder(s.items)
+	s.updateFilter()
+	s.selected = 0
 }
 
 func (s *LogSelector) updateFilter() {
@@ -193,6 +207,8 @@ func (s *LogSelector) loop() error {
 					if s.selected > 0 {
 						s.selected--
 					}
+				case 's': // Toggle sort order
+					s.toggleSort()
 				case '/': // Filter mode
 					s.inSearch = true
 					s.searchQuery = ""
@@ -296,7 +312,11 @@ func (s *LogSelector) draw() {
 	out.WriteString(fmt.Sprintf("\x1b[%d;1H", s.height))
 
 	// Draw Footer
-	footerText := " [j/k/Arrows]: Navigate  [Enter]: View Log  [/]: Filter Logs  [q/Esc]: Quit"
+	sortLabel := "new→old"
+	if !s.sortDesc {
+		sortLabel = "old→new"
+	}
+	footerText := fmt.Sprintf(" [j/k/Arrows]: Navigate  [Enter]: View  [s]: Sort: %s  [/]: Filter  [q]: Quit", sortLabel)
 	if s.inSearch {
 		footerText = fmt.Sprintf(" Filter logs (Enter to confirm): %s_", s.searchQuery)
 	}
