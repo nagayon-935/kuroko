@@ -45,6 +45,8 @@ func New(cfg *config.Config, args []string) (*Session, error) {
 }
 
 func (s *Session) Run() (int, error) {
+	writeBanner(os.Stderr, s.args, s.cfg)
+
 	fmt.Fprintf(os.Stderr, "\033[2m[kuroko] logging → %s\033[0m\n", s.log.Path)
 
 	command := strings.Join(s.args, " ")

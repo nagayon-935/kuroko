@@ -607,6 +607,43 @@ func uniquePath(dir, filename string) string {
 	}
 }
 
+// TargetName returns the human-readable target name for the given command
+// arguments (e.g. hostname for ssh, device for screen, command name otherwise).
+// Used by log filename generation.
+func TargetName(args []string) string {
+	_, hostname := TargetDetails(args)
+	return hostname
+}
+
+// TargetDetails returns two values:
+//   - address: full connection target as typed (e.g. "admin@router-a")
+//   - hostname: resolved canonical hostname (e.g. "router-a.dc1.example.jp")
+//
+// For non-SSH commands both values are identical.
+// The banner uses both values so operators see what they typed AND the resolved host.
+func TargetDetails(args []string) (address, hostname string) {
+	if len(args) == 0 {
+		return "", ""
+	}
+	cmd := args[0]
+	switch cmd {
+	case "ssh":
+		raw := extractSSHTarget(args[1:])  // user@host as typed
+		resolved := resolveSSHHostname(raw) // may resolve SSH config alias
+		// hostname is the bare host part of the resolved target
+		h := resolved
+		if idx := strings.LastIndex(h, "@"); idx >= 0 {
+			h = h[idx+1:]
+		}
+		return raw, h
+	case "screen":
+		t := extractScreenTarget(args[1:])
+		return t, t
+	default:
+		return cmd, cmd
+	}
+}
+
 func generateFilename(args []string) string {
 	ts := time.Now().Format("20060102_150405")
 	if len(args) == 0 {
@@ -614,26 +651,9 @@ func generateFilename(args []string) string {
 	}
 
 	cmd := args[0]
-	var target string
+	target := TargetName(args)
 
-	switch cmd {
-	case "ssh":
-		raw := extractSSHTarget(args[1:])
-		resolved := resolveSSHHostname(raw)
-		if idx := strings.LastIndex(resolved, "@"); idx >= 0 {
-			target = resolved[idx+1:]
-		} else {
-			target = resolved
-		}
-	case "screen":
-		target = extractScreenTarget(args[1:])
-	default:
-		if len(args) > 1 {
-			target = sanitize(args[1])
-		}
-	}
-
-	if target != "" {
+	if target != "" && target != cmd {
 		return fmt.Sprintf("%s_%s_%s.log", ts, cmd, sanitize(target))
 	}
 	return fmt.Sprintf("%s_%s.log", ts, sanitize(cmd))
