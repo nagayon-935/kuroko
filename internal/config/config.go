@@ -12,7 +12,7 @@ type Config struct {
 	Notifier  NotifierConfig  `json:"notifier"`
 	Storage   StorageConfig   `json:"storage"`
 	Redaction RedactionConfig `json:"redaction"`
-	Banner    BannerConfig    `json:"banner"`
+	Banner BannerConfig `json:"banner"`
 }
 
 // BannerConfig controls the session-start banner shown on stderr.

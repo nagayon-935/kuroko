@@ -209,6 +209,7 @@ func (v *Viewer) parseMetadata() {
 		lineLen := int64(len(line)) + 1 // +1 for the newline character
 
 		lineStr := string(line)
+
 		prefix := "# kuroko:cmd:"
 		if strings.HasPrefix(lineStr, prefix) {
 			payload := lineStr[len(prefix):]

@@ -148,7 +148,7 @@ func (s *Session) runWithPTY() (int, error) {
 	}()
 
 	// stdin → PTY master
-	go func() { io.Copy(ptmx, os.Stdin) }()
+	go func() { io.Copy(ptmx, os.Stdin) }() //nolint:errcheck
 
 	// PTY master → stdout + log file
 	io.Copy(io.MultiWriter(os.Stdout, s.log), ptmx)
