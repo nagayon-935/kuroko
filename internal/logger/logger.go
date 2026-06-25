@@ -228,6 +228,7 @@ type Logger struct {
 	inPEMBlock       bool   // state for tracking multi-line PEM blocks
 	inEsc            bool   // true if currently parsing an ANSI escape sequence
 	escBuf           []byte // buffer for the current escape sequence
+	networkMode      bool   // true when wrapping a NW device session (ssh/telnet/screen/…)
 }
 
 func New(logDir string, args []string, redactionEnabled bool) (*Logger, error) {
@@ -250,7 +251,12 @@ func New(logDir string, args []string, redactionEnabled bool) (*Logger, error) {
 		return nil, err
 	}
 
-	l := &Logger{file: f, Path: path, redactionEnabled: redactionEnabled}
+	l := &Logger{
+		file:             f,
+		Path:             path,
+		redactionEnabled: redactionEnabled,
+		networkMode:      isNetworkSessionCommand(args),
+	}
 
 	if os.Getenv("KUROKO_RAW_DEBUG") == "1" {
 		rawPath := path + ".raw"
@@ -379,12 +385,24 @@ func (l *Logger) processLine(data []byte) error {
 
 			// Try to detect and extract the command and prompt.
 			if prompt, cmd := SplitPrompt(out); prompt != nil {
-				// Case 1: The line already starts with a prompt (e.g. no accept-line redraw, or ll).
+				// Case 1: Shell prompt (bash/zsh/…).
 				l.storedPrompt = append(l.storedPrompt[:0], prompt...)
 				if len(cmd) > 0 {
 					hasCommand = true
 				}
-			} else if len(l.savedLine) > end {
+			} else if l.networkMode {
+				// Case 1b: Network device prompt (Cisco/Arista/Juniper/…).
+				// NW devices do not perform readline accept-line redraws, so we
+				// detect the prompt directly from the committed line.
+				if prompt, cmd, info := SplitPromptInfo(out); info.Kind != KindNone && info.Kind != KindShell {
+					l.storedPrompt = append(l.storedPrompt[:0], prompt...)
+					if len(cmd) > 0 {
+						hasCommand = true
+					}
+					_ = cmd // cmd content already in out; variable used for hasCommand only
+				}
+			}
+			if !hasCommand && len(l.savedLine) > end {
 				// Accept-line redraw happened.
 				bare := out
 				if len(bare) > 0 {
