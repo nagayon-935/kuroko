@@ -170,20 +170,28 @@ func (s *Session) handleTerminationSignals(oldState *term.State) (stop func()) {
 		if !ok {
 			return
 		}
-		term.Restore(int(os.Stdin.Fd()), oldState)
-		code := 128
-		if sysSig, ok := sig.(syscall.Signal); ok {
-			code += int(sysSig)
-		}
-		if cerr := s.log.Close(code); cerr != nil {
-			fmt.Fprintf(os.Stderr, "\033[33m[kuroko] log close error: %v\033[0m\n", cerr)
-		}
-		os.Exit(code)
+		os.Exit(s.terminateForSignal(sig, oldState))
 	}()
 	return func() {
 		signal.Stop(sigTerm)
 		close(sigTerm)
 	}
+}
+
+// terminateForSignal restores the terminal and flushes the session log for
+// termination signal sig, returning the process exit code to use. Split out
+// from handleTerminationSignals so the cleanup logic can be unit tested
+// without going through os.Exit.
+func (s *Session) terminateForSignal(sig os.Signal, oldState *term.State) int {
+	_ = term.Restore(int(os.Stdin.Fd()), oldState)
+	code := 128
+	if sysSig, ok := sig.(syscall.Signal); ok {
+		code += int(sysSig)
+	}
+	if cerr := s.log.Close(code); cerr != nil {
+		fmt.Fprintf(os.Stderr, "\033[33m[kuroko] log close error: %v\033[0m\n", cerr)
+	}
+	return code
 }
 
 // runPlain is a non-PTY fallback for piped/scripted invocations.
