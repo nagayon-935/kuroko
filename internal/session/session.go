@@ -59,7 +59,9 @@ func (s *Session) Run() (int, error) {
 	exitCode, err := s.runWithPTY()
 	duration := time.Since(start)
 
-	s.log.Close(exitCode)
+	if cerr := s.log.Close(exitCode); cerr != nil {
+		fmt.Fprintf(os.Stderr, "\033[33m[kuroko] log close error: %v\033[0m\n", cerr)
+	}
 
 	logPath := s.log.Path
 	if s.cfg.Storage.CompressOnClose {
@@ -83,7 +85,9 @@ func (s *Session) Run() (int, error) {
 	if s.cfg.Storage.Rotation.Enabled {
 		// Run GC in background so we don't block terminal exit.
 		go func() {
-			_ = logger.RotateLogs(s.cfg.LogDir, s.cfg.Storage.Rotation.MaxAgeDays, s.cfg.Storage.Rotation.MaxTotalSizeMB)
+			if rerr := logger.RotateLogs(s.cfg.LogDir, s.cfg.Storage.Rotation.MaxAgeDays, s.cfg.Storage.Rotation.MaxTotalSizeMB); rerr != nil {
+				fmt.Fprintf(os.Stderr, "\033[33m[kuroko] log rotation error: %v\033[0m\n", rerr)
+			}
 		}()
 	}
 
@@ -107,16 +111,8 @@ func (s *Session) runWithPTY() (int, error) {
 	}
 	defer ptmx.Close()
 
-	// Forward terminal resize events to the PTY.
-	sigWinch := make(chan os.Signal, 1)
-	signal.Notify(sigWinch, syscall.SIGWINCH)
-	defer signal.Stop(sigWinch)
-	go func() {
-		for range sigWinch {
-			_ = pty.InheritSize(os.Stdin, ptmx)
-		}
-	}()
-	sigWinch <- syscall.SIGWINCH
+	stopResize := forwardResizeSignals(ptmx)
+	defer stopResize()
 
 	// Set raw mode.
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
@@ -125,29 +121,13 @@ func (s *Session) runWithPTY() (int, error) {
 	}
 	defer term.Restore(int(os.Stdin.Fd()), oldState)
 
-	// Handle SIGTERM/SIGHUP: restore terminal and flush log before the process
-	// dies. os.Exit skips defers, so we do it explicitly in the goroutine.
-	sigTerm := make(chan os.Signal, 1)
-	signal.Notify(sigTerm, syscall.SIGTERM, syscall.SIGHUP)
-	go func() {
-		sig, ok := <-sigTerm
-		if !ok {
-			return
-		}
-		term.Restore(int(os.Stdin.Fd()), oldState)
-		code := 128
-		if s, ok := sig.(syscall.Signal); ok {
-			code += int(s)
-		}
-		s.log.Close(code)
-		os.Exit(code)
-	}()
-	defer func() {
-		signal.Stop(sigTerm)
-		close(sigTerm)
-	}()
+	stopTermHandler := s.handleTerminationSignals(oldState)
+	defer stopTermHandler()
 
-	// stdin → PTY master
+	// stdin → PTY master. This goroutine intentionally outlives runWithPTY:
+	// kuroko is a short-lived CLI process, so the blocked Stdin read is
+	// reclaimed by the OS when the process exits — there is no long-running
+	// server for it to leak into.
 	go func() { io.Copy(ptmx, os.Stdin) }() //nolint:errcheck
 
 	// PTY master → stdout + log file
@@ -160,6 +140,58 @@ func (s *Session) runWithPTY() (int, error) {
 		return 0, nil
 	}
 	return 0, nil
+}
+
+// forwardResizeSignals forwards terminal resize events (SIGWINCH) to the PTY
+// for as long as the session runs. The returned stop function releases the
+// signal channel and should be deferred by the caller.
+func forwardResizeSignals(ptmx *os.File) (stop func()) {
+	sigWinch := make(chan os.Signal, 1)
+	signal.Notify(sigWinch, syscall.SIGWINCH)
+	go func() {
+		for range sigWinch {
+			_ = pty.InheritSize(os.Stdin, ptmx)
+		}
+	}()
+	sigWinch <- syscall.SIGWINCH
+	return func() { signal.Stop(sigWinch) }
+}
+
+// handleTerminationSignals installs a SIGTERM/SIGHUP handler that restores
+// the terminal and flushes the session log before the process exits.
+// os.Exit skips deferred functions, so cleanup happens explicitly here.
+// The returned stop function releases the signal channel and should be
+// deferred by the caller.
+func (s *Session) handleTerminationSignals(oldState *term.State) (stop func()) {
+	sigTerm := make(chan os.Signal, 1)
+	signal.Notify(sigTerm, syscall.SIGTERM, syscall.SIGHUP)
+	go func() {
+		sig, ok := <-sigTerm
+		if !ok {
+			return
+		}
+		os.Exit(s.terminateForSignal(sig, oldState))
+	}()
+	return func() {
+		signal.Stop(sigTerm)
+		close(sigTerm)
+	}
+}
+
+// terminateForSignal restores the terminal and flushes the session log for
+// termination signal sig, returning the process exit code to use. Split out
+// from handleTerminationSignals so the cleanup logic can be unit tested
+// without going through os.Exit.
+func (s *Session) terminateForSignal(sig os.Signal, oldState *term.State) int {
+	_ = term.Restore(int(os.Stdin.Fd()), oldState)
+	code := 128
+	if sysSig, ok := sig.(syscall.Signal); ok {
+		code += int(sysSig)
+	}
+	if cerr := s.log.Close(code); cerr != nil {
+		fmt.Fprintf(os.Stderr, "\033[33m[kuroko] log close error: %v\033[0m\n", cerr)
+	}
+	return code
 }
 
 // runPlain is a non-PTY fallback for piped/scripted invocations.

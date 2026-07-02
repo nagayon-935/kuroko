@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // testLogContent matches the format written by internal/logger.
@@ -478,4 +479,45 @@ func TestViewerDrawSearchOutputMode(t *testing.T) {
 	v.searchMode = SearchOutput
 	v.searchQuery = "file"
 	v.draw()
+}
+
+func TestTruncateDisplay(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		width int
+		want  string
+	}{
+		{"shorter than width is unchanged", "abc", 10, "abc"},
+		{"exact width is unchanged", "abcde", 5, "abcde"},
+		{"ascii truncates with ellipsis", "abcdefghij", 5, "ab..."},
+		{
+			"multi-byte input truncates on rune boundaries, not bytes",
+			// Each 接/続/先 is a 3-byte UTF-8 rune; byte-slicing at a
+			// non-multiple-of-3 offset would previously corrupt this.
+			"接続先router1",
+			5,
+			"接続...",
+		},
+		{"multi-byte input shorter than width is unchanged", "接続先", 10, "接続先"},
+		{"width of exactly 3 truncates with no room for ellipsis", "abcdefgh", 3, "abc"},
+		{"width less than 3 truncates with no ellipsis", "abcdefgh", 2, "ab"},
+		{"width zero returns empty string", "abcdefgh", 0, ""},
+		{"negative width returns empty string", "abcdefgh", -1, ""},
+		{"empty input returns empty string", "", 5, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateDisplay(tt.input, tt.width)
+			if got != tt.want {
+				t.Errorf("truncateDisplay(%q, %d) = %q; want %q", tt.input, tt.width, got, tt.want)
+			}
+			// truncateDisplay must never split a multi-byte rune: the
+			// result must always be valid UTF-8.
+			if !utf8.ValidString(got) {
+				t.Errorf("truncateDisplay(%q, %d) = %q; not valid UTF-8", tt.input, tt.width, got)
+			}
+		})
+	}
 }

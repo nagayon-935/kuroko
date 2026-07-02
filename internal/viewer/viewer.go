@@ -11,11 +11,34 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/term"
 
 	"github.com/ryu/kuroko/internal/logger"
 )
+
+// chromeHeight is the number of terminal rows consumed by the header, the
+// blank spacer line, and the footer, leaving the remainder for the body.
+const chromeHeight = 3
+
+// truncateDisplay truncates s to at most width runes, appending "..." when
+// truncated. It slices by rune rather than by byte so multi-byte UTF-8
+// content (e.g. Japanese hostnames or device output) is never cut mid-rune,
+// which would otherwise emit invalid UTF-8 to the terminal.
+func truncateDisplay(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= width {
+		return s
+	}
+	if width <= 3 {
+		return string(r[:width])
+	}
+	return string(r[:width-3]) + "..."
+}
 
 type CommandMetadata struct {
 	Timestamp string `json:"timestamp"`
@@ -155,6 +178,16 @@ func (v *Viewer) updateMatches() {
 	}
 }
 
+// bodyHeight returns the number of rows available for the timeline/output
+// body, reserving chromeHeight rows for the header, spacer, and footer.
+func (v *Viewer) bodyHeight() int {
+	h := v.height - chromeHeight
+	if h < 1 {
+		h = 1
+	}
+	return h
+}
+
 func (v *Viewer) scrollToLine(targetLine int, bodyHeight int) {
 	if targetLine < 0 || targetLine >= len(v.currentOutputLines) {
 		return
@@ -213,10 +246,10 @@ func (v *Viewer) parseMetadata() {
 		prefix := "# kuroko:cmd:"
 		if strings.HasPrefix(lineStr, prefix) {
 			payload := lineStr[len(prefix):]
-			
+
 			var timestamp string
 			var command string
-			
+
 			// For backwards compatibility, handle old format "timestamp|command"
 			if idx := strings.Index(payload, "|"); idx >= 0 {
 				timestamp = payload[:idx]
@@ -305,10 +338,7 @@ func (v *Viewer) loop() error {
 				if leftWidth < 30 {
 					leftWidth = 30
 				}
-				bodyHeight := v.height - 3
-				if bodyHeight < 1 {
-					bodyHeight = 1
-				}
+				bodyHeight := v.bodyHeight()
 
 				if btn == 64 { // Scroll Up
 					if x <= leftWidth {
@@ -362,10 +392,7 @@ func (v *Viewer) loop() error {
 					if v.searchMode == SearchOutput {
 						v.outputQuery = v.searchQuery
 						v.updateMatches()
-						bodyHeight := v.height - 3
-						if bodyHeight < 1 {
-							bodyHeight = 1
-						}
+						bodyHeight := v.bodyHeight()
 						if len(v.matchLines) > 0 {
 							v.scrollToLine(v.matchLines[v.activeMatch], bodyHeight)
 						}
@@ -382,10 +409,7 @@ func (v *Viewer) loop() error {
 						} else {
 							v.outputQuery = v.searchQuery
 							v.updateMatches()
-							bodyHeight := v.height - 3
-							if bodyHeight < 1 {
-								bodyHeight = 1
-							}
+							bodyHeight := v.bodyHeight()
 							if len(v.matchLines) > 0 {
 								v.scrollToLine(v.matchLines[v.activeMatch], bodyHeight)
 							}
@@ -403,10 +427,7 @@ func (v *Viewer) loop() error {
 						} else {
 							v.outputQuery = v.searchQuery
 							v.updateMatches()
-							bodyHeight := v.height - 3
-							if bodyHeight < 1 {
-								bodyHeight = 1
-							}
+							bodyHeight := v.bodyHeight()
 							if len(v.matchLines) > 0 {
 								v.scrollToLine(v.matchLines[v.activeMatch], bodyHeight)
 							}
@@ -440,10 +461,7 @@ func (v *Viewer) loop() error {
 							v.outputScroll = 0
 						}
 					} else {
-						bodyHeight := v.height - 3
-						if bodyHeight < 1 {
-							bodyHeight = 1
-						}
+						bodyHeight := v.bodyHeight()
 						v.outputScroll += 3
 						if v.outputScroll > len(v.currentOutputLines)-bodyHeight {
 							v.outputScroll = len(v.currentOutputLines) - bodyHeight
@@ -467,10 +485,7 @@ func (v *Viewer) loop() error {
 					}
 				case 4: // Ctrl+D
 					if v.activePane == PaneOutput {
-						bodyHeight := v.height - 3
-						if bodyHeight < 1 {
-							bodyHeight = 1
-						}
+						bodyHeight := v.bodyHeight()
 						v.outputScroll += bodyHeight
 						if v.outputScroll > len(v.currentOutputLines)-bodyHeight {
 							v.outputScroll = len(v.currentOutputLines) - bodyHeight
@@ -481,10 +496,7 @@ func (v *Viewer) loop() error {
 					}
 				case 21: // Ctrl+U
 					if v.activePane == PaneOutput {
-						bodyHeight := v.height - 3
-						if bodyHeight < 1 {
-							bodyHeight = 1
-						}
+						bodyHeight := v.bodyHeight()
 						v.outputScroll -= bodyHeight
 						if v.outputScroll < 0 {
 							v.outputScroll = 0
@@ -504,19 +516,13 @@ func (v *Viewer) loop() error {
 				case 'n': // Next output search match
 					if len(v.matchLines) > 0 && v.activeMatch != -1 {
 						v.activeMatch = (v.activeMatch + 1) % len(v.matchLines)
-						bodyHeight := v.height - 3
-						if bodyHeight < 1 {
-							bodyHeight = 1
-						}
+						bodyHeight := v.bodyHeight()
 						v.scrollToLine(v.matchLines[v.activeMatch], bodyHeight)
 					}
 				case 'N': // Previous output search match
 					if len(v.matchLines) > 0 && v.activeMatch != -1 {
 						v.activeMatch = (v.activeMatch - 1 + len(v.matchLines)) % len(v.matchLines)
-						bodyHeight := v.height - 3
-						if bodyHeight < 1 {
-							bodyHeight = 1
-						}
+						bodyHeight := v.bodyHeight()
 						v.scrollToLine(v.matchLines[v.activeMatch], bodyHeight)
 					}
 				}
@@ -544,10 +550,7 @@ func (v *Viewer) loop() error {
 							v.outputScroll = 0
 						}
 					} else {
-						bodyHeight := v.height - 3
-						if bodyHeight < 1 {
-							bodyHeight = 1
-						}
+						bodyHeight := v.bodyHeight()
 						v.outputScroll += 3
 						if v.outputScroll > len(v.currentOutputLines)-bodyHeight {
 							v.outputScroll = len(v.currentOutputLines) - bodyHeight
@@ -563,10 +566,7 @@ func (v *Viewer) loop() error {
 				}
 			} else if len(key) == 4 && key[0] == 27 && key[1] == '[' && key[3] == '~' {
 				// PageUp / PageDown keys: e.g. Esc [ 5 ~ (PageUp), Esc [ 6 ~ (PageDown)
-				bodyHeight := v.height - 3
-				if bodyHeight < 1 {
-					bodyHeight = 1
-				}
+				bodyHeight := v.bodyHeight()
 				if key[2] == '5' { // PageUp
 					if v.activePane == PaneOutput {
 						v.outputScroll -= bodyHeight
@@ -608,10 +608,7 @@ func (v *Viewer) draw() {
 		leftWidth = 30
 	}
 	rightWidth := v.width - leftWidth - 1 // -1 for border
-	bodyHeight := v.height - 3            // header + empty line + footer
-	if bodyHeight < 1 {
-		bodyHeight = 1
-	}
+	bodyHeight := v.bodyHeight()
 
 	// Draw Header with active pane indicator
 	paneStr := " PANE: [Timeline]  Output"
@@ -647,10 +644,10 @@ func (v *Viewer) draw() {
 			}
 
 			leftText = fmt.Sprintf("%s[%s] %s", indicator, ts, cmd.Command)
-			if len(leftText) > leftWidth {
-				leftText = leftText[:leftWidth-3] + "..."
+			if n := utf8.RuneCountInString(leftText); n > leftWidth {
+				leftText = truncateDisplay(leftText, leftWidth)
 			} else {
-				leftText += strings.Repeat(" ", leftWidth-len(leftText))
+				leftText += strings.Repeat(" ", leftWidth-n)
 			}
 
 			if r == v.selected {
@@ -685,10 +682,10 @@ func (v *Viewer) draw() {
 			}
 
 			truncated := line
-			if len(line) > rightWidth {
-				truncated = line[:rightWidth-3] + "..."
+			if n := utf8.RuneCountInString(line); n > rightWidth {
+				truncated = truncateDisplay(line, rightWidth)
 			} else {
-				truncated = line + strings.Repeat(" ", rightWidth-len(line))
+				truncated = line + strings.Repeat(" ", rightWidth-n)
 			}
 
 			if isMatch {

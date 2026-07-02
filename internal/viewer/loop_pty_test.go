@@ -74,53 +74,53 @@ func TestViewerLoopNavigation(t *testing.T) {
 	// Key sequences sent after the loop's 50 ms startup sleep.
 	seqs := [][]byte{
 		// --- Timeline pane navigation ---
-		{'j'},              // down: selected → 1
-		{'k'},              // up:   selected → 0
-		{27, '[', 'B'},    // Down arrow
-		{27, '[', 'A'},    // Up arrow (already at 0, clamped)
+		{'j'},          // down: selected → 1
+		{'k'},          // up:   selected → 0
+		{27, '[', 'B'}, // Down arrow
+		{27, '[', 'A'}, // Up arrow (already at 0, clamped)
 		// --- Switch to Output pane ---
-		{'l'},              // 'l' → PaneOutput
+		{'l'}, // 'l' → PaneOutput
 		// --- Output pane scroll ---
-		{'j'},              // scroll down
-		{27, '[', 'B'},    // Down arrow (scroll)
-		{'k'},              // scroll up
-		{27, '[', 'A'},    // Up arrow (scroll)
-		{4},               // Ctrl+D: page down
-		{21},              // Ctrl+U: page up
+		{'j'},               // scroll down
+		{27, '[', 'B'},      // Down arrow (scroll)
+		{'k'},               // scroll up
+		{27, '[', 'A'},      // Up arrow (scroll)
+		{4},                 // Ctrl+D: page down
+		{21},                // Ctrl+U: page up
 		{27, '[', '6', '~'}, // PageDown
 		{27, '[', '5', '~'}, // PageUp
 		// --- Arrow pane switch ---
-		{27, '[', 'D'},    // Left arrow → PaneTimeline
-		{27, '[', 'C'},    // Right arrow → PaneOutput
+		{27, '[', 'D'}, // Left arrow → PaneTimeline
+		{27, '[', 'C'}, // Right arrow → PaneOutput
 		// --- Tab pane toggle ---
-		{9},               // Tab → PaneTimeline
-		{9},               // Tab → PaneOutput
+		{9}, // Tab → PaneTimeline
+		{9}, // Tab → PaneOutput
 		// --- 'h' back to timeline ---
-		{'h'},             // → PaneTimeline
+		{'h'}, // → PaneTimeline
 		// --- Command search (/) ---
-		{'/'},             // enter search mode (SearchCommands)
-		{'l'},             // type 'l'
-		{'s'},             // type 's' → searchQuery="ls"
-		{127},             // Backspace → searchQuery="l"
-		{'\r'},            // Enter: confirm filter
+		{'/'},  // enter search mode (SearchCommands)
+		{'l'},  // type 'l'
+		{'s'},  // type 's' → searchQuery="ls"
+		{127},  // Backspace → searchQuery="l"
+		{'\r'}, // Enter: confirm filter
 		// --- Clear filter ---
-		{'/'},             // search mode again
-		{'\r'},            // Enter with empty query: restore all
+		{'/'},  // search mode again
+		{'\r'}, // Enter with empty query: restore all
 		// --- Output search (f) ---
-		{'f'},             // enter output search mode
-		{'f'},             // type 'f' → searchQuery="f"
-		{'i'},             // type 'i'
-		{'l'},             // type 'l'
-		{'e'},             // type 'e' → searchQuery="file"
-		{127},             // Backspace in SearchOutput → searchQuery="fil"
-		{'\r'},            // Enter: confirm → outputQuery="fil"
+		{'f'},  // enter output search mode
+		{'f'},  // type 'f' → searchQuery="f"
+		{'i'},  // type 'i'
+		{'l'},  // type 'l'
+		{'e'},  // type 'e' → searchQuery="file"
+		{127},  // Backspace in SearchOutput → searchQuery="fil"
+		{'\r'}, // Enter: confirm → outputQuery="fil"
 		// --- Match navigation ---
-		{'n'},             // next match (no-op if empty)
-		{'N'},             // prev match (no-op if empty)
+		{'n'}, // next match (no-op if empty)
+		{'N'}, // prev match (no-op if empty)
 		// --- Output search cancel ---
-		{'f'},             // output search mode again
-		{'x'},             // type 'x'
-		{27},              // Esc → cancel
+		{'f'}, // output search mode again
+		{'x'}, // type 'x'
+		{27},  // Esc → cancel
 		// --- Quit ---
 		{'q'},
 	}
@@ -188,9 +188,9 @@ func TestViewerLoopSearchCtrlC(t *testing.T) {
 	go func() {
 		time.Sleep(200 * time.Millisecond)
 		sendKeys(ptmx, [][]byte{
-			{'/'},  // enter search mode
-			{'a'},  // type a char
-			{3},    // Ctrl+C inside search → return nil
+			{'/'}, // enter search mode
+			{'a'}, // type a char
+			{3},   // Ctrl+C inside search → return nil
 		})
 	}()
 
@@ -225,22 +225,22 @@ func TestSelectorLoopNavigation(t *testing.T) {
 
 	seqs := [][]byte{
 		// Navigation
-		{'j'},           // down
-		{'k'},           // up
+		{'j'},          // down
+		{'k'},          // up
 		{27, '[', 'B'}, // Down arrow
 		{27, '[', 'A'}, // Up arrow
 		// Filter search
-		{'/'},           // enter search mode
-		{'s', 'e'},      // type "se" (matches "session*")
-		{127},           // Backspace → "s"
-		{'\r'},          // Enter: confirm
+		{'/'},      // enter search mode
+		{'s', 'e'}, // type "se" (matches "session*")
+		{127},      // Backspace → "s"
+		{'\r'},     // Enter: confirm
 		// Clear filter
 		{'/'},
-		{'\r'},          // empty Enter: restore all
+		{'\r'}, // empty Enter: restore all
 		// Search mode Ctrl+C
 		{'/'},
 		{'a'},
-		{3},             // Ctrl+C in search → return nil
+		{3}, // Ctrl+C in search → return nil
 	}
 
 	go func() {
