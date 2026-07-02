@@ -83,7 +83,7 @@ func TestScanLogsWithSubdir(t *testing.T) {
 
 func TestScanLogsNonMatchingFiles(t *testing.T) {
 	tmp := t.TempDir()
-	os.WriteFile(filepath.Join(tmp, "data.csv"), []byte("a,b"), 0o600)  // not .log or .log.gz
+	os.WriteFile(filepath.Join(tmp, "data.csv"), []byte("a,b"), 0o600) // not .log or .log.gz
 	os.WriteFile(filepath.Join(tmp, "run.log"), []byte("log"), 0o600)
 
 	s := &LogSelector{logDir: tmp}

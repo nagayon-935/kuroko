@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -209,7 +210,6 @@ func SplitPrompt(line []byte) ([]byte, []byte) {
 	return nil, nil
 }
 
-
 // Logger writes session output to a file, applying ANSI stripping and a
 // terminal line-buffer simulation so the log is human-readable plain text.
 type Logger struct {
@@ -229,6 +229,8 @@ type Logger struct {
 	inEsc            bool   // true if currently parsing an ANSI escape sequence
 	escBuf           []byte // buffer for the current escape sequence
 	networkMode      bool   // true when wrapping a NW device session (ssh/telnet/screen/…)
+	closeOnce        sync.Once
+	closeErr         error
 }
 
 func New(logDir string, args []string, redactionEnabled bool) (*Logger, error) {
@@ -324,7 +326,7 @@ func (l *Logger) writeFiltered(data []byte) error {
 // simulation.  This handles the control characters that readline uses for
 // in-place line editing:
 //   - \r  (0x0D) carriage return — set pendingCR; the reset to column 0 is
-//                deferred until the next printable character arrives.
+//     deferred until the next printable character arrives.
 //   - \b  (0x08) backspace — move cursor one column left
 //   - \n  (0x0A) newline    — commit the current line to the file
 //
@@ -542,8 +544,19 @@ func (l *Logger) processEscape(seq []byte) {
 	}
 }
 
-
+// Close flushes any remaining buffered output, writes the session footer, and
+// closes the underlying files. It is safe to call concurrently or more than
+// once (e.g. from both the normal exit path and a SIGTERM/SIGHUP handler
+// racing to shut down before the process dies) — only the first call does
+// the work; later calls return the same result.
 func (l *Logger) Close(exitCode int) error {
+	l.closeOnce.Do(func() {
+		l.closeErr = l.doClose(exitCode)
+	})
+	return l.closeErr
+}
+
+func (l *Logger) doClose(exitCode int) error {
 	// Flush any unterminated line; apply the same savedLine validation as processLine.
 	end := l.lineCol
 	if end > len(l.lineBuf) {
@@ -589,8 +602,6 @@ func (l *Logger) Close(exitCode int) error {
 	return l.file.Close()
 }
 
-
-
 // uniquePath returns path unchanged if it does not exist, otherwise appends _1, _2, …
 func uniquePath(dir, filename string) string {
 	path := filepath.Join(dir, filename)
@@ -628,7 +639,7 @@ func TargetDetails(args []string) (address, hostname string) {
 	cmd := args[0]
 	switch cmd {
 	case "ssh":
-		raw := extractSSHTarget(args[1:])  // user@host as typed
+		raw := extractSSHTarget(args[1:])   // user@host as typed
 		resolved := resolveSSHHostname(raw) // may resolve SSH config alias
 		// hostname is the bare host part of the resolved target
 		h := resolved
@@ -815,7 +826,9 @@ func RotateLogs(logDir string, maxAgeDays int, maxTotalSizeMB int) error {
 
 		// 1. Remove files older than maxAgeDays
 		if maxAgeDays > 0 && now.Sub(modTime) > maxAge {
-			_ = os.Remove(path)
+			if rerr := os.Remove(path); rerr != nil && !os.IsNotExist(rerr) {
+				fmt.Fprintf(os.Stderr, "\033[33m[kuroko] rotation: failed to remove %s: %v\033[0m\n", path, rerr)
+			}
 			continue
 		}
 

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/term"
 
@@ -221,9 +222,9 @@ func (s *LogSelector) loop() error {
 						// Temporarily restore terminal state to run the sub-viewer.
 						// The sub-viewer will set up raw mode itself.
 						term.Restore(int(os.Stdin.Fd()), oldState)
-						
+
 						// Run viewer
-						_ = Run(fullPath)
+						viewErr := Run(fullPath)
 
 						// Re-enter raw mode and clear/save screen
 						oldState, err = term.MakeRaw(int(os.Stdin.Fd()))
@@ -233,9 +234,14 @@ func (s *LogSelector) loop() error {
 						// Clear screen and redraw selector
 						_, _ = os.Stdout.Write([]byte("\x1b[?1049h\x1b[?25l\x1b[2J"))
 						time.Sleep(50 * time.Millisecond)
+						if viewErr != nil {
+							fmt.Fprintf(os.Stderr, "\r\n[kuroko] viewer error: %v\r\n", viewErr)
+						}
 
 						// Re-scan in case logs changed
-						_ = s.scanLogs()
+						if serr := s.scanLogs(); serr != nil {
+							fmt.Fprintf(os.Stderr, "\r\n[kuroko] rescan error: %v\r\n", serr)
+						}
 						s.updateFilter()
 					}
 				}
@@ -255,6 +261,16 @@ func (s *LogSelector) loop() error {
 	}
 }
 
+// bodyHeight returns the number of rows available for the log list,
+// reserving chromeHeight rows for the header, spacer, and footer.
+func (s *LogSelector) bodyHeight() int {
+	h := s.height - chromeHeight
+	if h < 1 {
+		h = 1
+	}
+	return h
+}
+
 func (s *LogSelector) draw() {
 	s.width, s.height, _ = term.GetSize(int(os.Stdin.Fd()))
 	if s.width <= 0 || s.height <= 0 {
@@ -265,10 +281,7 @@ func (s *LogSelector) draw() {
 	var out bytes.Buffer
 	out.WriteString("\x1b[H")
 
-	bodyHeight := s.height - 3
-	if bodyHeight < 1 {
-		bodyHeight = 1
-	}
+	bodyHeight := s.bodyHeight()
 
 	// Draw Header
 	header := fmt.Sprintf(" kuroko logs selector  [ Dir: %s ]", s.logDir)
@@ -291,13 +304,13 @@ func (s *LogSelector) draw() {
 			// Format item line: modTime, size, name
 			ts := item.modTime.Format("2006-01-02 15:04:05")
 			sizeStr := formatSize(item.size)
-			
+
 			// Try to align nicely
 			line = fmt.Sprintf("%s[%s] (%-8s) %s", indicator, ts, sizeStr, item.name)
-			if len(line) > s.width {
-				line = line[:s.width-3] + "..."
+			if n := utf8.RuneCountInString(line); n > s.width {
+				line = truncateDisplay(line, s.width)
 			} else {
-				line += strings.Repeat(" ", s.width-len(line))
+				line += strings.Repeat(" ", s.width-n)
 			}
 
 			if r == s.selected {

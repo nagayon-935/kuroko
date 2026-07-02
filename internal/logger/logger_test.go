@@ -18,15 +18,15 @@ func TestExtractSSHTarget(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"user@host",                  []string{"user@host"},                    "user@host"},
-		{"host only",                  []string{"hostname"},                     "hostname"},
-		{"-p flag",                    []string{"-p", "2222", "user@host"},     "user@host"},
-		{"-i flag",                    []string{"-i", "key.pem", "user@host"},  "user@host"},
-		{"-l and host",                []string{"-l", "user", "hostname"},       "hostname"},
-		{"multiple flags",             []string{"-p", "22", "-i", "k", "host"}, "host"},
-		{"empty",                      []string{},                               ""},
-		{"flags only",                 []string{"-v"},                           ""},
-		{"-J jump host then target",   []string{"-J", "jump", "user@host"},     "user@host"},
+		{"user@host", []string{"user@host"}, "user@host"},
+		{"host only", []string{"hostname"}, "hostname"},
+		{"-p flag", []string{"-p", "2222", "user@host"}, "user@host"},
+		{"-i flag", []string{"-i", "key.pem", "user@host"}, "user@host"},
+		{"-l and host", []string{"-l", "user", "hostname"}, "hostname"},
+		{"multiple flags", []string{"-p", "22", "-i", "k", "host"}, "host"},
+		{"empty", []string{}, ""},
+		{"flags only", []string{"-v"}, ""},
+		{"-J jump host then target", []string{"-J", "jump", "user@host"}, "user@host"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -44,11 +44,11 @@ func TestExtractScreenTarget(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"full path",        []string{"/dev/ttyUSB0"},            "ttyUSB0"},
-		{"with baud rate",   []string{"/dev/ttyUSB0", "115200"}, "ttyUSB0"},
-		{"ttyS0",            []string{"/dev/ttyS0"},              "ttyS0"},
-		{"flag then device", []string{"-fn", "/dev/ttyUSB0"},    "ttyUSB0"},
-		{"empty",            []string{},                          ""},
+		{"full path", []string{"/dev/ttyUSB0"}, "ttyUSB0"},
+		{"with baud rate", []string{"/dev/ttyUSB0", "115200"}, "ttyUSB0"},
+		{"ttyS0", []string{"/dev/ttyS0"}, "ttyS0"},
+		{"flag then device", []string{"-fn", "/dev/ttyUSB0"}, "ttyUSB0"},
+		{"empty", []string{}, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -65,13 +65,13 @@ func TestSanitize(t *testing.T) {
 		input string
 		want  string
 	}{
-		{"user@host",    "user@host"},
+		{"user@host", "user@host"},
 		{"/dev/ttyUSB0", "_dev_ttyUSB0"},
-		{"host:22",      "host_22"},
-		{"a b c",        "a_b_c"},
-		{"normal",       "normal"},
-		{"a/b\\c",       "a_b_c"},
-		{"a*b?c",        "a_b_c"},
+		{"host:22", "host_22"},
+		{"a b c", "a_b_c"},
+		{"normal", "normal"},
+		{"a/b\\c", "a_b_c"},
+		{"a*b?c", "a_b_c"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
@@ -327,8 +327,8 @@ func TestLoggerReadlineAcceptLine(t *testing.T) {
 
 	// Simulate: prompt + command built up while the user types, then
 	// readline redraws with just the command (no prompt) before executing.
-	l.Write([]byte("user@host:~$ cat file.txt"))        // interactive echo
-	l.Write([]byte("\rcat file.txt\r\r\n"))              // accept-line redraw
+	l.Write([]byte("user@host:~$ cat file.txt")) // interactive echo
+	l.Write([]byte("\rcat file.txt\r\r\n"))      // accept-line redraw
 	l.Write([]byte("output line\n"))
 	l.Close(0)
 
@@ -489,7 +489,7 @@ func TestLoggerSameLengthCommandSwap(t *testing.T) {
 	// \r sets savedLine=cat), then user switched to "vim file" (same length).
 	// Both commands are deliberately the same byte-length.
 	l.Write([]byte("user@host:~$ cat file"))   // readline echo — 21 chars
-	l.Write([]byte("\r"))                       // Ctrl-U / readline refresh \r → savedLine = cat cmd
+	l.Write([]byte("\r"))                      // Ctrl-U / readline refresh \r → savedLine = cat cmd
 	l.Write([]byte("user@host:~$ vim file"))   // readline redraws with vim cmd
 	l.Write([]byte("\ruser@host:~$ vim file")) // vim accept-line redraw
 	l.Write([]byte("\r\r\n"))                  // accept-line CRLF (ONLCR)
@@ -563,16 +563,16 @@ func TestLoggerHistoryContaminationSwap(t *testing.T) {
 	// After ANSI stripping the history rendering looks like raw text appended
 	// to whatever the prompt wrote — hence the garbage prefix below.
 	l.Write([]byte("user@host:~$ cat c9lab/x.yml")) // history display artifact
-	l.Write([]byte("\r"))                            // accept-line \r → savedLine = "...cat..." (garbage)
+	l.Write([]byte("\r"))                           // accept-line \r → savedLine = "...cat..." (garbage)
 	l.Write([]byte("vim c9lab/x.yml"))              // bare cmd overwrites from col 0
-	l.Write([]byte("\r\r\n"))                        // ONLCR CRLF
+	l.Write([]byte("\r\r\n"))                       // ONLCR CRLF
 	l.Write([]byte("[full-screen app active — output suppressed]\n"))
 
 	// ── Step 3: cat command with history-browsing contamination ─────────────
 	l.Write([]byte("user@host:~$ vim c9lab/x.yml")) // history display artifact (vim from prev)
-	l.Write([]byte("\r"))                            // accept-line \r → savedLine = "...vim..." (garbage)
+	l.Write([]byte("\r"))                           // accept-line \r → savedLine = "...vim..." (garbage)
 	l.Write([]byte("cat c9lab/x.yml"))              // bare cmd overwrites from col 0
-	l.Write([]byte("\r\r\n"))                        // ONLCR CRLF
+	l.Write([]byte("\r\r\n"))                       // ONLCR CRLF
 	l.Write([]byte("name: foo\n"))
 	l.Close(0)
 
@@ -891,9 +891,9 @@ func TestLoggerHistoryRecallVim(t *testing.T) {
 
 	// 2. Browse history, rendering "cat file.txt" then "vim"
 	l.Write([]byte("user@host:~$ cat file.txt")) // show cat from history
-	l.Write([]byte("\r"))                         // navigate history
-	l.Write([]byte("vim"))                        // show vim (only cmd written due to redraw optimization/cursor)
-	l.Write([]byte("\rvim\r\r\n"))                // accept-line sequence for vim
+	l.Write([]byte("\r"))                        // navigate history
+	l.Write([]byte("vim"))                       // show vim (only cmd written due to redraw optimization/cursor)
+	l.Write([]byte("\rvim\r\r\n"))               // accept-line sequence for vim
 	l.Write([]byte("[alt screen active]\n"))
 	l.Close(0)
 
@@ -1010,14 +1010,14 @@ func TestIsCompleteEscape(t *testing.T) {
 		seq  []byte
 		want bool
 	}{
-		{"OSC with BEL",       []byte("\x1b]0;title\x07"),    true},
-		{"OSC with ESC ST",    []byte("\x1b]0;title\x1b\\"),  true},
-		{"OSC incomplete",     []byte("\x1b]0;title"),         false},
-		{"two-char ESC M",     []byte("\x1bM"),                true},
-		{"two-char only ESC",  []byte("\x1b"),                 false},
-		{"CSI complete",       []byte("\x1b[2J"),              true},
-		{"CSI incomplete",     []byte("\x1b[2"),               false},
-		{"empty",              []byte{},                       false},
+		{"OSC with BEL", []byte("\x1b]0;title\x07"), true},
+		{"OSC with ESC ST", []byte("\x1b]0;title\x1b\\"), true},
+		{"OSC incomplete", []byte("\x1b]0;title"), false},
+		{"two-char ESC M", []byte("\x1bM"), true},
+		{"two-char only ESC", []byte("\x1b"), false},
+		{"CSI complete", []byte("\x1b[2J"), true},
+		{"CSI incomplete", []byte("\x1b[2"), false},
+		{"empty", []byte{}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1032,13 +1032,13 @@ func TestIsCompleteEscape(t *testing.T) {
 // TestLoggerCursorMovement covers ESC[C (cursor forward) and ESC[D (cursor backward).
 func TestLoggerCursorMovement(t *testing.T) {
 	tests := []struct {
-		name        string
-		input       string
-		want        string
-		wantAbsent  string
+		name       string
+		input      string
+		want       string
+		wantAbsent string
 	}{
 		{
-			name:  "cursor forward then overwrite",
+			name: "cursor forward then overwrite",
 			// "hello", back 3 (col=2), forward 1 (col=3), write "XY" → "helXY"
 			input: "hello\x1b[3D\x1b[1CXY\n",
 			want:  "helXY",
@@ -1093,13 +1093,13 @@ func TestLoggerDeleteChars(t *testing.T) {
 			want:  "hello orld",
 		},
 		{
-			name:  "delete beyond end truncates to cursor",
+			name: "delete beyond end truncates to cursor",
 			// "hello world" (11 chars), back 5 → col=6, delete 99 → lineBuf[:6] = "hello "
 			input: "hello world\x1b[5D\x1b[99P\n",
 			want:  "hello ",
 		},
 		{
-			name:  "delete at end is no-op",
+			name: "delete at end is no-op",
 			// "hello", lineCol=5 == len → condition false, no change
 			input: "hello\x1b[1P\n",
 			want:  "hello",
@@ -1142,7 +1142,7 @@ func TestLoggerProcessLineBehaviors(t *testing.T) {
 			absent: []string{"hello"},
 		},
 		{
-			name:  "non-CSI two-char escape ignored",
+			name: "non-CSI two-char escape ignored",
 			// ESC+M is "Reverse Index" — processEscape returns early, surrounding text survives.
 			input: "hello\x1bMworld\n",
 			want:  []string{"helloworld"},
@@ -1264,7 +1264,7 @@ func TestCloseHistoryContaminationSavedLine(t *testing.T) {
 	// using storedPrompt + bare instead of the contaminated savedLine.
 	l.Write([]byte("user@host:~$ cat foo")) // contamination in lineBuf
 	l.Write([]byte("\r"))                   // accept-line \r: savedLine = "user@host:~$ cat foo"
-	l.Write([]byte("vim foo"))             // bare cmd overwrites from col 0
+	l.Write([]byte("vim foo"))              // bare cmd overwrites from col 0
 	// No \n — Close() handles the unterminated line.
 	l.Close(0)
 

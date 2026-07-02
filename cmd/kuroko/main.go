@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/ryu/kuroko/internal/config"
 	"github.com/ryu/kuroko/internal/session"
@@ -92,7 +93,7 @@ func main() {
 		if len(rest) < 2 {
 			fatalf("usage: kuroko view <logfile>")
 		}
-		if err := viewer.Run(rest[1]); err != nil {
+		if err := viewer.Run(filepath.Clean(rest[1])); err != nil {
 			fatalf("viewer error: %v", err)
 		}
 		os.Exit(0)
@@ -114,7 +115,6 @@ func main() {
 	}
 	os.Exit(exitCode)
 }
-
 
 func fatalf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "\033[31m[kuroko] "+format+"\033[0m\n", args...)

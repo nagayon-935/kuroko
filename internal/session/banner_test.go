@@ -170,7 +170,7 @@ func TestDisplayWidth(t *testing.T) {
 		width int
 	}{
 		{"abc", 3},
-		{"接続先", 6},  // 3 CJK chars × 2 columns each
+		{"接続先", 6},            // 3 CJK chars × 2 columns each
 		{"  接続先: router", 14}, // 2 + 6 + 2 + 6 = 16... let me calculate: "  "=2, "接続先"=6, ": "=2, "router"=6 = 16
 		{"[PRODUCTION]", 12},
 	}

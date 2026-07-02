@@ -39,8 +39,8 @@ func New(cfg Config) Notifier {
 
 type noopNotifier struct{}
 
-func (n *noopNotifier) NotifyStart(string) error                                    { return nil }
-func (n *noopNotifier) NotifyEnd(string, string, int, time.Duration) error          { return nil }
+func (n *noopNotifier) NotifyStart(string) error                           { return nil }
+func (n *noopNotifier) NotifyEnd(string, string, int, time.Duration) error { return nil }
 
 // --- Discord ---
 
@@ -93,13 +93,25 @@ func (d *discordNotifier) NotifyEnd(logPath, command string, exitCode int, durat
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
 
-	pw, _ := mw.CreateFormField("payload_json")
-	pw.Write(payloadJSON)
+	pw, err := mw.CreateFormField("payload_json")
+	if err != nil {
+		return fmt.Errorf("creating payload_json field: %w", err)
+	}
+	if _, err := pw.Write(payloadJSON); err != nil {
+		return fmt.Errorf("writing payload_json field: %w", err)
+	}
 
-	fw, _ := mw.CreateFormFile("files[0]", filepath.Base(logPath))
-	fw.Write(logContent)
+	fw, err := mw.CreateFormFile("files[0]", filepath.Base(logPath))
+	if err != nil {
+		return fmt.Errorf("creating file field: %w", err)
+	}
+	if _, err := fw.Write(logContent); err != nil {
+		return fmt.Errorf("writing file field: %w", err)
+	}
 
-	mw.Close()
+	if err := mw.Close(); err != nil {
+		return fmt.Errorf("closing multipart writer: %w", err)
+	}
 
 	req, err := http.NewRequest(http.MethodPost, d.webhookURL, &buf)
 	if err != nil {
@@ -149,8 +161,12 @@ func (s *slackNotifier) NotifyEnd(logPath, command string, exitCode int, duratio
 
 // --- helpers ---
 
+// httpClient is used for all webhook requests. A bounded timeout prevents an
+// unreachable or slow webhook from hanging session start/end indefinitely.
+var httpClient = &http.Client{Timeout: 10 * time.Second}
+
 func doRequest(req *http.Request) error {
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
 	}
