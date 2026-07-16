@@ -23,6 +23,8 @@ type Session struct {
 	args     []string
 	log      *logger.Logger
 	notifier notifier.Notifier
+	cmd      *exec.Cmd // set once the child process starts; read by terminateForSignal to propagate termination signals
+	start    time.Time // set at the beginning of Run(); read by terminateForSignal to compute NotifyEnd's duration
 }
 
 func New(cfg *config.Config, args []string) (*Session, error) {
@@ -55,9 +57,9 @@ func (s *Session) Run() (int, error) {
 		fmt.Fprintf(os.Stderr, "\033[33m[kuroko] notify error: %v\033[0m\n", err)
 	}
 
-	start := time.Now()
+	s.start = time.Now()
 	exitCode, err := s.runWithPTY()
-	duration := time.Since(start)
+	duration := time.Since(s.start)
 
 	if cerr := s.log.Close(exitCode); cerr != nil {
 		fmt.Fprintf(os.Stderr, "\033[33m[kuroko] log close error: %v\033[0m\n", cerr)
@@ -110,6 +112,7 @@ func (s *Session) runWithPTY() (int, error) {
 		return 1, fmt.Errorf("pty start: %w", err)
 	}
 	defer ptmx.Close()
+	s.cmd = cmd
 
 	stopResize := forwardResizeSignals(ptmx)
 	defer stopResize()
@@ -130,16 +133,27 @@ func (s *Session) runWithPTY() (int, error) {
 	// server for it to leak into.
 	go func() { io.Copy(ptmx, os.Stdin) }() //nolint:errcheck
 
-	// PTY master → stdout + log file
-	io.Copy(io.MultiWriter(os.Stdout, s.log), ptmx)
+	// PTY master → stdout + log file. The log side is wrapped fail-open so a
+	// log write error (e.g. disk full) never stalls this copy: an unwrapped
+	// MultiWriter aborts entirely on the first error/short write from any
+	// writer, which would stop draining the PTY and hang the child process
+	// (and this terminal) the next time it writes.
+	io.Copy(io.MultiWriter(os.Stdout, newFailOpenWriter(s.log)), ptmx)
 
-	if err := cmd.Wait(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return exitErr.ExitCode(), nil
-		}
+	return waitResult(cmd.Wait())
+}
+
+// waitResult converts the error returned by cmd.Wait() (or the error from
+// cmd.Run(), which has the same shape) into a process exit code. Split out
+// so the exit-code mapping is unit-testable without a real PTY or process.
+func waitResult(err error) (int, error) {
+	if err == nil {
 		return 0, nil
 	}
-	return 0, nil
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		return exitErr.ExitCode(), nil
+	}
+	return 1, fmt.Errorf("waiting for command: %w", err)
 }
 
 // forwardResizeSignals forwards terminal resize events (SIGWINCH) to the PTY
@@ -154,7 +168,10 @@ func forwardResizeSignals(ptmx *os.File) (stop func()) {
 		}
 	}()
 	sigWinch <- syscall.SIGWINCH
-	return func() { signal.Stop(sigWinch) }
+	return func() {
+		signal.Stop(sigWinch)
+		close(sigWinch)
+	}
 }
 
 // handleTerminationSignals installs a SIGTERM/SIGHUP handler that restores
@@ -164,7 +181,7 @@ func forwardResizeSignals(ptmx *os.File) (stop func()) {
 // deferred by the caller.
 func (s *Session) handleTerminationSignals(oldState *term.State) (stop func()) {
 	sigTerm := make(chan os.Signal, 1)
-	signal.Notify(sigTerm, syscall.SIGTERM, syscall.SIGHUP)
+	signal.Notify(sigTerm, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGINT)
 	go func() {
 		sig, ok := <-sigTerm
 		if !ok {
@@ -184,13 +201,25 @@ func (s *Session) handleTerminationSignals(oldState *term.State) (stop func()) {
 // without going through os.Exit.
 func (s *Session) terminateForSignal(sig os.Signal, oldState *term.State) int {
 	_ = term.Restore(int(os.Stdin.Fd()), oldState)
+
+	sysSig, hasSysSig := sig.(syscall.Signal)
+	if s.cmd != nil && s.cmd.Process != nil && hasSysSig {
+		_ = s.cmd.Process.Signal(sysSig)
+	}
+
 	code := 128
-	if sysSig, ok := sig.(syscall.Signal); ok {
+	if hasSysSig {
 		code += int(sysSig)
 	}
 	if cerr := s.log.Close(code); cerr != nil {
 		fmt.Fprintf(os.Stderr, "\033[33m[kuroko] log close error: %v\033[0m\n", cerr)
 	}
+
+	command := strings.Join(s.args, " ")
+	if nerr := s.notifier.NotifyEnd(s.log.Path, command, code, time.Since(s.start)); nerr != nil {
+		fmt.Fprintf(os.Stderr, "\033[33m[kuroko] notify error: %v\033[0m\n", nerr)
+	}
+
 	return code
 }
 
@@ -198,14 +227,12 @@ func (s *Session) terminateForSignal(sig os.Signal, oldState *term.State) int {
 func (s *Session) runPlain() (int, error) {
 	cmd := exec.Command(s.args[0], s.args[1:]...)
 	cmd.Stdin = os.Stdin
-	cmd.Stdout = io.MultiWriter(os.Stdout, s.log)
-	cmd.Stderr = io.MultiWriter(os.Stderr, s.log)
+	// Each stream gets its own fail-open wrapper around the shared log: cmd
+	// copies Stdout and Stderr concurrently in separate goroutines, and a
+	// hard failure on one stream must not affect the other's independent
+	// fail-open state.
+	cmd.Stdout = io.MultiWriter(os.Stdout, newFailOpenWriter(s.log))
+	cmd.Stderr = io.MultiWriter(os.Stderr, newFailOpenWriter(s.log))
 
-	if err := cmd.Run(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return exitErr.ExitCode(), nil
-		}
-		return 1, err
-	}
-	return 0, nil
+	return waitResult(cmd.Run())
 }
