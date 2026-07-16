@@ -9,11 +9,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"golang.org/x/term"
 
 	"github.com/ryu/kuroko/internal/config"
+	"github.com/ryu/kuroko/internal/textwidth"
 )
 
 type selectorItem struct {
@@ -32,6 +32,7 @@ type LogSelector struct {
 	sortDesc    bool // true = newest first (default), false = oldest first
 	width       int
 	height      int
+	listScroll  int
 }
 
 func RunSelector(cfg *config.Config) error {
@@ -163,8 +164,8 @@ func (s *LogSelector) loop() error {
 					}
 				} else if btn == 0 { // Left click press
 					r := y - 3
-					if r >= 0 && r < len(s.filtered) {
-						s.selected = r
+					if idx := clickRowToIndex(r, s.listScroll, len(s.filtered)); idx >= 0 {
+						s.selected = idx
 					}
 				}
 			}
@@ -231,8 +232,11 @@ func (s *LogSelector) loop() error {
 						if err != nil {
 							return err
 						}
-						// Clear screen and redraw selector
-						_, _ = os.Stdout.Write([]byte("\x1b[?1049h\x1b[?25l\x1b[2J"))
+						// Clear screen and redraw selector. The sub-viewer disabled
+						// mouse tracking on its own exit, so it must be re-enabled
+						// here or wheel/click navigation stays dead for the rest of
+						// the selector's lifetime.
+						_, _ = os.Stdout.Write([]byte("\x1b[?1049h\x1b[?25l\x1b[2J\x1b[?1000h\x1b[?1006h"))
 						time.Sleep(50 * time.Millisecond)
 						if viewErr != nil {
 							fmt.Fprintf(os.Stderr, "\r\n[kuroko] viewer error: %v\r\n", viewErr)
@@ -282,22 +286,26 @@ func (s *LogSelector) draw() {
 	out.WriteString("\x1b[H")
 
 	bodyHeight := s.bodyHeight()
+	s.listScroll = followSelection(s.selected, s.listScroll, bodyHeight)
 
 	// Draw Header
 	header := fmt.Sprintf(" kuroko logs selector  [ Dir: %s ]", s.logDir)
-	if len(header) < s.width {
-		header += strings.Repeat(" ", s.width-len(header))
+	if n := textwidth.String(header); n > s.width {
+		header = truncateDisplay(header, s.width)
+	} else {
+		header += strings.Repeat(" ", s.width-n)
 	}
-	out.WriteString(fmt.Sprintf("\x1b[30;47m%s\x1b[0m\x1b[K\r\n", header[:s.width]))
+	out.WriteString(fmt.Sprintf("\x1b[30;47m%s\x1b[0m\x1b[K\r\n", header))
 	out.WriteString("\x1b[K\r\n")
 
 	// Render items
 	for r := 0; r < bodyHeight; r++ {
 		var line string
-		if r < len(s.filtered) {
-			item := s.filtered[r]
+		listRow := r + s.listScroll
+		if listRow < len(s.filtered) {
+			item := s.filtered[listRow]
 			indicator := "  "
-			if r == s.selected {
+			if listRow == s.selected {
 				indicator = "> "
 			}
 
@@ -307,13 +315,13 @@ func (s *LogSelector) draw() {
 
 			// Try to align nicely
 			line = fmt.Sprintf("%s[%s] (%-8s) %s", indicator, ts, sizeStr, item.name)
-			if n := utf8.RuneCountInString(line); n > s.width {
+			if n := textwidth.String(line); n > s.width {
 				line = truncateDisplay(line, s.width)
 			} else {
 				line += strings.Repeat(" ", s.width-n)
 			}
 
-			if r == s.selected {
+			if listRow == s.selected {
 				line = fmt.Sprintf("\x1b[30;47m%s\x1b[0m", line)
 			}
 		} else {
@@ -333,10 +341,12 @@ func (s *LogSelector) draw() {
 	if s.inSearch {
 		footerText = fmt.Sprintf(" Filter logs (Enter to confirm): %s_", s.searchQuery)
 	}
-	if len(footerText) < s.width {
-		footerText += strings.Repeat(" ", s.width-len(footerText))
+	if n := textwidth.String(footerText); n > s.width {
+		footerText = truncateDisplay(footerText, s.width)
+	} else {
+		footerText += strings.Repeat(" ", s.width-n)
 	}
-	out.WriteString(fmt.Sprintf("\x1b[30;47m%s\x1b[0m\x1b[K", footerText[:s.width]))
+	out.WriteString(fmt.Sprintf("\x1b[30;47m%s\x1b[0m\x1b[K", footerText))
 
 	os.Stdout.Write(out.Bytes())
 }

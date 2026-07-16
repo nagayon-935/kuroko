@@ -11,33 +11,49 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"golang.org/x/term"
 
 	"github.com/ryu/kuroko/internal/logger"
+	"github.com/ryu/kuroko/internal/textwidth"
 )
 
 // chromeHeight is the number of terminal rows consumed by the header, the
 // blank spacer line, and the footer, leaving the remainder for the body.
 const chromeHeight = 3
 
-// truncateDisplay truncates s to at most width runes, appending "..." when
-// truncated. It slices by rune rather than by byte so multi-byte UTF-8
-// content (e.g. Japanese hostnames or device output) is never cut mid-rune,
-// which would otherwise emit invalid UTF-8 to the terminal.
+// truncateDisplay truncates s to at most width terminal columns, appending
+// "..." when truncated. Width is measured with textwidth.String rather than
+// rune count, since East Asian Wide/Fullwidth characters (e.g. Japanese
+// hostnames or device output) occupy two columns each; truncating by rune
+// count alone drifts the pane's right border out of alignment. Truncation
+// always stops on a rune boundary, so the result is valid UTF-8.
 func truncateDisplay(s string, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	r := []rune(s)
-	if len(r) <= width {
+	if textwidth.String(s) <= width {
 		return s
 	}
-	if width <= 3 {
-		return string(r[:width])
+	budget := width
+	suffix := ""
+	if width > 3 {
+		budget = width - 3
+		suffix = "..."
 	}
-	return string(r[:width-3]) + "..."
+	var b strings.Builder
+	col := 0
+	for _, r := range s {
+		w := textwidth.Rune(r)
+		if col+w > budget {
+			break
+		}
+		b.WriteRune(r)
+		col += w
+	}
+	return b.String() + suffix
 }
 
 type CommandMetadata struct {
@@ -78,6 +94,7 @@ type Viewer struct {
 	height             int
 	activePane         Pane
 	outputScroll       int
+	timelineScroll     int
 	currentOutputLines []string
 }
 
@@ -200,36 +217,56 @@ func (v *Viewer) scrollToLine(targetLine int, bodyHeight int) {
 	}
 }
 
+// highlightQuery wraps case-insensitive matches of query in line with ANSI
+// highlight codes. Matching is done rune-by-rune with unicode.ToLower rather
+// than via strings.ToLower(line) + strings.Index: ToLower can change a
+// string's byte length (e.g. U+212A KELVIN SIGN → "k"), which would make an
+// index found in the lowercased copy invalid to slice directly out of the
+// original (differently-sized) string — a byte-offset table keyed by rune
+// position keeps every slice bound valid by construction.
 func highlightQuery(line string, query string, isActive bool) string {
 	if query == "" {
 		return line
 	}
-	lowerLine := strings.ToLower(line)
-	lowerQuery := strings.ToLower(query)
+	queryRunes := []rune(query)
+	lineRunes := []rune(line)
+
+	byteOffsets := make([]int, len(lineRunes)+1)
+	offset := 0
+	for i, r := range lineRunes {
+		byteOffsets[i] = offset
+		offset += utf8.RuneLen(r)
+	}
+	byteOffsets[len(lineRunes)] = offset
 
 	var result strings.Builder
-	lastIdx := 0
-
-	for {
-		idx := strings.Index(lowerLine[lastIdx:], lowerQuery)
-		if idx == -1 {
-			result.WriteString(line[lastIdx:])
-			break
+	lastByte := 0
+	for i := 0; i <= len(lineRunes)-len(queryRunes); i++ {
+		if !runesEqualFold(lineRunes[i:i+len(queryRunes)], queryRunes) {
+			continue
 		}
-
-		actualIdx := lastIdx + idx
-		result.WriteString(line[lastIdx:actualIdx])
-
-		matchText := line[actualIdx : actualIdx+len(query)]
+		startByte, endByte := byteOffsets[i], byteOffsets[i+len(queryRunes)]
+		result.WriteString(line[lastByte:startByte])
+		matchText := line[startByte:endByte]
 		if isActive {
-			result.WriteString(fmt.Sprintf("\x1b[30;42m%s\x1b[0m", matchText))
+			fmt.Fprintf(&result, "\x1b[30;42m%s\x1b[0m", matchText)
 		} else {
-			result.WriteString(fmt.Sprintf("\x1b[30;43m%s\x1b[0m", matchText))
+			fmt.Fprintf(&result, "\x1b[30;43m%s\x1b[0m", matchText)
 		}
-
-		lastIdx = actualIdx + len(query)
+		lastByte = endByte
+		i += len(queryRunes) - 1
 	}
+	result.WriteString(line[lastByte:])
 	return result.String()
+}
+
+func runesEqualFold(a, b []rune) bool {
+	for i := range a {
+		if unicode.ToLower(a[i]) != unicode.ToLower(b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func (v *Viewer) parseMetadata() {
@@ -371,8 +408,8 @@ func (v *Viewer) loop() error {
 					r := y - 3
 					if x <= leftWidth {
 						v.activePane = PaneTimeline
-						if r >= 0 && r < len(v.filteredIdx) {
-							v.selected = r
+						if idx := clickRowToIndex(r, v.timelineScroll, len(v.filteredIdx)); idx >= 0 {
+							v.selected = idx
 							v.updateOutput()
 						}
 					} else if x > leftWidth+1 {
@@ -609,6 +646,7 @@ func (v *Viewer) draw() {
 	}
 	rightWidth := v.width - leftWidth - 1 // -1 for border
 	bodyHeight := v.bodyHeight()
+	v.timelineScroll = followSelection(v.selected, v.timelineScroll, bodyHeight)
 
 	// Draw Header with active pane indicator
 	paneStr := " PANE: [Timeline]  Output"
@@ -616,10 +654,12 @@ func (v *Viewer) draw() {
 		paneStr = " PANE:  Timeline  [Output]"
 	}
 	header := fmt.Sprintf(" kuroko log viewer  [ File: %s ]%s", filepath.Base(v.logPath), paneStr)
-	if len(header) < v.width {
-		header += strings.Repeat(" ", v.width-len(header))
+	if n := textwidth.String(header); n > v.width {
+		header = truncateDisplay(header, v.width)
+	} else {
+		header += strings.Repeat(" ", v.width-n)
 	}
-	out.WriteString(fmt.Sprintf("\x1b[30;47m%s\x1b[0m\x1b[K\r\n", header[:v.width]))
+	out.WriteString(fmt.Sprintf("\x1b[30;47m%s\x1b[0m\x1b[K\r\n", header))
 
 	// Draw Empty line between header and body
 	out.WriteString("\x1b[K\r\n")
@@ -628,8 +668,9 @@ func (v *Viewer) draw() {
 	for r := 0; r < bodyHeight; r++ {
 		// 1. Left pane (Timeline list of commands)
 		var leftText string
-		if r < len(v.filteredIdx) {
-			cmdIdx := v.filteredIdx[r]
+		timelineRow := r + v.timelineScroll
+		if timelineRow < len(v.filteredIdx) {
+			cmdIdx := v.filteredIdx[timelineRow]
 			cmd := v.allCmds[cmdIdx]
 
 			// Format timestamp
@@ -639,18 +680,18 @@ func (v *Viewer) draw() {
 			}
 
 			indicator := "  "
-			if r == v.selected {
+			if timelineRow == v.selected {
 				indicator = "> "
 			}
 
 			leftText = fmt.Sprintf("%s[%s] %s", indicator, ts, cmd.Command)
-			if n := utf8.RuneCountInString(leftText); n > leftWidth {
+			if n := textwidth.String(leftText); n > leftWidth {
 				leftText = truncateDisplay(leftText, leftWidth)
 			} else {
 				leftText += strings.Repeat(" ", leftWidth-n)
 			}
 
-			if r == v.selected {
+			if timelineRow == v.selected {
 				// Highlight selected line in timeline
 				leftText = fmt.Sprintf("\x1b[30;47m%s\x1b[0m", leftText)
 			}
@@ -682,7 +723,7 @@ func (v *Viewer) draw() {
 			}
 
 			truncated := line
-			if n := utf8.RuneCountInString(line); n > rightWidth {
+			if n := textwidth.String(line); n > rightWidth {
 				truncated = truncateDisplay(line, rightWidth)
 			} else {
 				truncated = line + strings.Repeat(" ", rightWidth-n)
@@ -723,10 +764,12 @@ func (v *Viewer) draw() {
 			footerText = fmt.Sprintf(" Find in output (Enter to confirm): %s_", v.searchQuery)
 		}
 	}
-	if len(footerText) < v.width {
-		footerText += strings.Repeat(" ", v.width-len(footerText))
+	if n := textwidth.String(footerText); n > v.width {
+		footerText = truncateDisplay(footerText, v.width)
+	} else {
+		footerText += strings.Repeat(" ", v.width-n)
 	}
-	out.WriteString(fmt.Sprintf("\x1b[30;47m%s\x1b[0m\x1b[K", footerText[:v.width]))
+	out.WriteString(fmt.Sprintf("\x1b[30;47m%s\x1b[0m\x1b[K", footerText))
 
 	os.Stdout.Write(out.Bytes())
 }

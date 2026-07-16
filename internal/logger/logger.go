@@ -13,6 +13,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
+
+	"github.com/ryu/kuroko/internal/textwidth"
 )
 
 // ansiEscape matches ANSI/VT100 terminal control sequences:
@@ -218,8 +221,9 @@ type Logger struct {
 	Path             string
 	altScreen        bool   // true while a full-screen app (vim/less) owns the terminal
 	seqBuf           []byte // incomplete escape sequence carried across Write calls
-	lineBuf          []byte // current output line being assembled
-	lineCol          int    // cursor column within lineBuf
+	runeBuf          []byte // incomplete UTF-8 rune carried across Write calls
+	lineBuf          []rune // current output line, one terminal column per slot (wide runes occupy two slots; see wideContinuation)
+	lineCol          int    // cursor column within lineBuf (display columns, not bytes or runes)
 	pendingCR        bool   // \r was the last control char seen; defer reset until next char
 	savedLine        []byte // lineBuf snapshot taken at the first bare \r before any overwrite
 	storedPrompt     []byte // last verified shell prompt; used to recover from readline history contamination
@@ -356,16 +360,7 @@ func (l *Logger) processLine(data []byte) error {
 		}
 		if b == 0x1b {
 			if l.pendingCR {
-				// Snapshot the current lineBuf just before it gets overwritten,
-				// but only if it contains a valid shell prompt.
-				if l.lineCol > 0 {
-					if prompt, _ := SplitPrompt(l.lineBuf[:l.lineCol]); prompt != nil {
-						l.savedLine = append(l.savedLine[:0], l.lineBuf[:l.lineCol]...)
-						l.storedPrompt = append(l.storedPrompt[:0], prompt...)
-					}
-				}
-				l.lineCol = 0
-				l.pendingCR = false
+				l.snapshotSavedLine()
 			}
 			l.inEsc = true
 			l.escBuf = []byte{b}
@@ -381,7 +376,7 @@ func (l *Logger) processLine(data []byte) error {
 			if end > len(l.lineBuf) {
 				end = len(l.lineBuf)
 			}
-			out := l.lineBuf[:end:end]
+			out := renderLine(l.lineBuf[:end])
 
 			var hasCommand bool
 
@@ -404,7 +399,7 @@ func (l *Logger) processLine(data []byte) error {
 					_ = cmd // cmd content already in out; variable used for hasCommand only
 				}
 			}
-			if !hasCommand && len(l.savedLine) > end {
+			if !hasCommand && len(l.savedLine) > len(out) {
 				// Accept-line redraw happened.
 				bare := out
 				if len(bare) > 0 {
@@ -457,31 +452,103 @@ func (l *Logger) processLine(data []byte) error {
 			if b < 0x20 {
 				continue // discard other non-printable control bytes
 			}
+			// Accumulate UTF-8 bytes until a full rune is available; a
+			// multi-byte character (e.g. Japanese) may be split across
+			// several PTY bytes, or even across Write() calls, since this
+			// state persists on the Logger between calls.
+			l.runeBuf = append(l.runeBuf, b)
+			if !utf8.FullRune(l.runeBuf) {
+				continue
+			}
+			r, _ := utf8.DecodeRune(l.runeBuf)
+			l.runeBuf = l.runeBuf[:0]
+
 			if l.pendingCR {
-				// Snapshot the current lineBuf just before it gets overwritten,
-				// but only if it contains a valid shell prompt.
-				if l.lineCol > 0 {
-					if prompt, _ := SplitPrompt(l.lineBuf[:l.lineCol]); prompt != nil {
-						l.savedLine = append(l.savedLine[:0], l.lineBuf[:l.lineCol]...)
-						l.storedPrompt = append(l.storedPrompt[:0], prompt...)
-					}
-				}
-				l.lineCol = 0
-				l.pendingCR = false
+				l.snapshotSavedLine()
 			}
-			if l.lineCol < len(l.lineBuf) {
-				l.lineBuf[l.lineCol] = b
-			} else {
-				// Pad with spaces if cursor was moved right beyond end of buffer
-				for len(l.lineBuf) < l.lineCol {
-					l.lineBuf = append(l.lineBuf, ' ')
-				}
-				l.lineBuf = append(l.lineBuf, b)
-			}
-			l.lineCol++
+			l.putRune(r)
 		}
 	}
 	return nil
+}
+
+// snapshotSavedLine captures the current lineBuf, up to the cursor, into
+// savedLine when it looks like a valid shell prompt, then resets lineCol to
+// 0. It runs on the first escape or printable byte to arrive after a bare
+// \r (pendingCR), just before that byte overwrites lineBuf — see the
+// processLine doc comment for why this snapshot is needed to survive
+// readline's accept-line redraw.
+func (l *Logger) snapshotSavedLine() {
+	if l.lineCol > 0 {
+		end := l.lineCol
+		if end > len(l.lineBuf) {
+			end = len(l.lineBuf)
+		}
+		committed := renderLine(l.lineBuf[:end])
+		if prompt, _ := SplitPrompt(committed); prompt != nil {
+			l.savedLine = append(l.savedLine[:0], committed...)
+			l.storedPrompt = append(l.storedPrompt[:0], prompt...)
+		}
+	}
+	l.lineCol = 0
+	l.pendingCR = false
+}
+
+// wideContinuation marks the second terminal column occupied by an East
+// Asian Wide/Fullwidth rune (see internal/textwidth). It lets lineBuf be
+// indexed directly by column — matching how a real terminal's cell grid
+// works — while renderLine skips these placeholder cells when reassembling
+// the actual text.
+const wideContinuation rune = 0
+
+// renderLine reassembles the text represented by a column-indexed cell
+// slice, skipping wideContinuation placeholder cells. It is the inverse of
+// putRune, which spreads one rune across 1 or 2 columns.
+func renderLine(cells []rune) []byte {
+	var buf bytes.Buffer
+	buf.Grow(len(cells))
+	for _, r := range cells {
+		if r == wideContinuation {
+			continue
+		}
+		buf.WriteRune(r)
+	}
+	return buf.Bytes()
+}
+
+// putRune writes r at the cursor's current column — padding lineBuf with
+// spaces if the cursor was previously moved past the end of the buffer,
+// e.g. by CSI C — and advances lineCol by r's terminal display width. A
+// wide rune occupies two consecutive columns: the rune itself in the
+// first, and wideContinuation in the second, so that an edit later
+// overwriting only the second column doesn't leave the buffer holding a
+// rune through just one of its two cells.
+func (l *Logger) putRune(r rune) {
+	w := textwidth.Rune(r)
+	if w <= 0 {
+		// Control/combining runes: occupy one column rather than zero, to
+		// keep the column model simple. These are rare in the shell
+		// prompts and NW device output kuroko targets.
+		w = 1
+	}
+	l.setCell(l.lineCol, r)
+	for i := 1; i < w; i++ {
+		l.setCell(l.lineCol+i, wideContinuation)
+	}
+	l.lineCol += w
+}
+
+// setCell writes r at column col, padding lineBuf with spaces up to col if
+// the cursor had previously moved past the end of the buffer.
+func (l *Logger) setCell(col int, r rune) {
+	for len(l.lineBuf) < col {
+		l.lineBuf = append(l.lineBuf, ' ')
+	}
+	if col < len(l.lineBuf) {
+		l.lineBuf[col] = r
+	} else {
+		l.lineBuf = append(l.lineBuf, r)
+	}
 }
 
 func (l *Logger) processEscape(seq []byte) {
@@ -562,10 +629,10 @@ func (l *Logger) doClose(exitCode int) error {
 	if end > len(l.lineBuf) {
 		end = len(l.lineBuf)
 	}
-	out := l.lineBuf[:end]
+	out := renderLine(l.lineBuf[:end])
 	if prompt, _ := SplitPrompt(out); prompt != nil {
 		// Already has prompt.
-	} else if len(l.savedLine) > end {
+	} else if len(l.savedLine) > len(out) {
 		bare := out
 		if len(bare) > 0 {
 			if prompt, cmd := SplitPrompt(l.savedLine); prompt != nil {

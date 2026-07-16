@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestExtractSSHTarget(t *testing.T) {
@@ -1355,5 +1356,150 @@ func TestLoggerEscClearPendingCR(t *testing.T) {
 	}
 	if strings.Contains(content, "vimer@host:~$") {
 		t.Errorf("prompt was contaminated: %s", content)
+	}
+}
+
+// TestLoggerJapaneseTextRoundTrips is the baseline: plain multi-byte text
+// typed without any cursor editing must survive intact.
+func TestLoggerJapaneseTextRoundTrips(t *testing.T) {
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host"}, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	l.Write([]byte("接続確認スイッチ01\n"))
+	l.Close(0)
+
+	data, err := os.ReadFile(l.Path)
+	if err != nil {
+		t.Fatalf("ReadFile %s: %v", l.Path, err)
+	}
+	if !utf8.Valid(data) {
+		t.Fatalf("log contains invalid UTF-8:\n%q", data)
+	}
+	if !strings.Contains(string(data), "接続確認スイッチ01") {
+		t.Errorf("expected Japanese text to survive intact, got:\n%s", string(data))
+	}
+}
+
+// TestLoggerJapaneseBackspaceOverwrite covers B1: readline's in-place
+// backspace/overwrite editing when the erased content includes full-width
+// (East Asian Wide) runes such as Japanese. lineBuf previously indexed by
+// byte, treating each backspace as "move back one byte" — but readline (and
+// every real terminal) moves the cursor back one *display column* per
+// backspace, and a Japanese character is 2 columns wide but 3 UTF-8 bytes.
+// Erasing such a character with the column-correct number of backspaces
+// used to land mid-rune and corrupt the encoding.
+func TestLoggerJapaneseBackspaceOverwrite(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		wantAbsent  string
+		wantContain string
+	}{
+		{
+			// "あ" occupies 2 terminal columns; two backspaces (the
+			// column-correct erase) must fully remove it, not just two of
+			// its three UTF-8 bytes.
+			name:       "two backspaces fully erase one full-width kanji",
+			input:      "あ\x08\x08\n",
+			wantAbsent: "あ",
+		},
+		{
+			// Pathological case: a single backspace lands exactly between
+			// the two display columns of "う". The result must still be
+			// valid UTF-8 even though the visual erase is a best-effort
+			// (real terminals are also inconsistent here).
+			name:        "single backspace mid-wide-rune still yields valid UTF-8",
+			input:       "あいう\x08X\n",
+			wantContain: "あい",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			l, err := New(tmp, []string{"ssh", "host"}, false)
+			if err != nil {
+				t.Fatalf("New() error: %v", err)
+			}
+			l.Write([]byte(tt.input))
+			l.Close(0)
+
+			data, err := os.ReadFile(l.Path)
+			if err != nil {
+				t.Fatalf("ReadFile %s: %v", l.Path, err)
+			}
+			if !utf8.Valid(data) {
+				t.Fatalf("log contains invalid UTF-8 after backspace edit:\n%q", data)
+			}
+			content := string(data)
+			if tt.wantAbsent != "" && strings.Contains(content, tt.wantAbsent) {
+				t.Errorf("expected %q to be fully erased, got:\n%s", tt.wantAbsent, content)
+			}
+			if tt.wantContain != "" && !strings.Contains(content, tt.wantContain) {
+				t.Errorf("expected %q in log, got:\n%s", tt.wantContain, content)
+			}
+		})
+	}
+}
+
+// TestLoggerJapaneseCursorMovementCSID covers B1's CSI D (cursor backward)
+// case: ESC[nD's parameter n is a column count, so moving left across a
+// wide rune requires n=2, not n=1. Before the fix, lineCol was a byte
+// index, so "move left 2" landed inside the 3-byte encoding of a Japanese
+// character instead of before it, and the subsequent overwrite corrupted
+// the sequence.
+func TestLoggerJapaneseCursorMovementCSID(t *testing.T) {
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host"}, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// "あい" (4 columns): move left 2 columns lands exactly before "い",
+	// then overwrite it with "XY".
+	l.Write([]byte("あい\x1b[2DXY\n"))
+	l.Close(0)
+
+	data, err := os.ReadFile(l.Path)
+	if err != nil {
+		t.Fatalf("ReadFile %s: %v", l.Path, err)
+	}
+	if !utf8.Valid(data) {
+		t.Fatalf("log contains invalid UTF-8 after CSI D overwrite:\n%q", data)
+	}
+	content := string(data)
+	if !strings.Contains(content, "あXY") {
+		t.Errorf("expected column-accurate overwrite %q in log, got:\n%s", "あXY", content)
+	}
+}
+
+// TestLoggerJapaneseMidLineInsertion covers B1's "mid-line insertion" case:
+// a shell that doesn't use insert/delete-character escapes typically
+// redraws by moving the cursor back and retyping from the insertion point
+// to the end of the line. Inserting a wide rune partway through an ASCII
+// line, then retyping the tail, must produce valid UTF-8 with the tail
+// intact.
+func TestLoggerJapaneseMidLineInsertion(t *testing.T) {
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host"}, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// "abcdef", back 3 columns (after "abc"), insert "あ" then retype "def".
+	l.Write([]byte("abcdef\x1b[3Dあdef\n"))
+	l.Close(0)
+
+	data, err := os.ReadFile(l.Path)
+	if err != nil {
+		t.Fatalf("ReadFile %s: %v", l.Path, err)
+	}
+	if !utf8.Valid(data) {
+		t.Fatalf("log contains invalid UTF-8 after mid-line insertion:\n%q", data)
+	}
+	content := string(data)
+	if !strings.Contains(content, "abcあdef") {
+		t.Errorf("expected %q in log, got:\n%s", "abcあdef", content)
 	}
 }

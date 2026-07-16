@@ -1,6 +1,7 @@
 package viewer
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ryu/kuroko/internal/config"
+	"github.com/ryu/kuroko/internal/textwidth"
 )
 
 func TestFormatSize(t *testing.T) {
@@ -176,8 +178,83 @@ func TestSelectorDrawLongLine(t *testing.T) {
 	s.draw()
 }
 
+// TestSelectorDrawHeaderAndFooterAlignWithWideCharacters mirrors
+// TestViewerDrawHeaderAndFooterAlignWithWideCharacters for LogSelector: the
+// header embeds s.logDir and the footer embeds s.searchQuery while
+// filtering, both of which can contain full-width Japanese characters (a
+// log directory under a Japanese hostname, or a filter query typed by the
+// user). Before the C4 fix, header/footer padding used len() (bytes) and
+// sliced footerText[:s.width] by byte offset, drifting the row's true
+// display width away from s.width whenever wide characters were present.
+func TestSelectorDrawHeaderAndFooterAlignWithWideCharacters(t *testing.T) {
+	tmp := t.TempDir()
+	logDir := filepath.Join(tmp, "ログ保存先")
+	if err := os.Mkdir(logDir, 0o700); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(logDir, "20260618_ssh_host.log"), []byte("log"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s, err := newSelector(logDir)
+	if err != nil {
+		t.Fatalf("newSelector(): %v", err)
+	}
+	s.width, s.height = 80, 24
+	s.inSearch = true
+	s.searchQuery = "接続確認スイッチ"
+
+	restore := captureStdout(t)
+	s.draw()
+	output := restore()
+
+	for i, line := range strings.Split(stripANSI(output), "\r\n") {
+		if line == "" {
+			continue
+		}
+		if n := textwidth.String(line); n != s.width {
+			t.Errorf("rendered line %d %q has display width %d; want exactly %d", i, line, n, s.width)
+		}
+	}
+}
+
 // TestRunSelectorNonTerminal verifies RunSelector propagates the MakeRaw error
 // that occurs when stdin is not a TTY (which is always the case under go test).
+// TestSelectorDrawScrollsToKeepSelectionVisible mirrors
+// TestViewerDrawScrollsToKeepSelectionVisible for LogSelector's single log
+// list: before the C1 fix, draw() always rendered items[0:bodyHeight]
+// regardless of s.selected, so a selection past the visible window was
+// never shown.
+func TestSelectorDrawScrollsToKeepSelectionVisible(t *testing.T) {
+	tmp := t.TempDir()
+	const numLogs = 30 // comfortably exceeds the default 80x24 fallback's ~21-row body
+	for i := 0; i < numLogs; i++ {
+		name := fmt.Sprintf("20260618_%03d_target.log", i)
+		if err := os.WriteFile(filepath.Join(tmp, name), []byte("log"), 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+
+	s, err := newSelector(tmp)
+	if err != nil {
+		t.Fatalf("newSelector(): %v", err)
+	}
+	if len(s.filtered) != numLogs {
+		t.Fatalf("expected %d items, got %d", numLogs, len(s.filtered))
+	}
+
+	s.selected = len(s.filtered) - 1 // select the last item
+
+	restore := captureStdout(t)
+	s.draw()
+	output := restore()
+
+	lastName := s.filtered[s.selected].name
+	if !strings.Contains(output, lastName) {
+		t.Errorf("draw() output missing selected item %q; scrolling did not bring it into view", lastName)
+	}
+}
+
 func TestRunSelectorNonTerminal(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := &config.Config{LogDir: tmp}
