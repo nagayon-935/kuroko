@@ -32,6 +32,7 @@ type LogSelector struct {
 	sortDesc    bool // true = newest first (default), false = oldest first
 	width       int
 	height      int
+	listScroll  int
 }
 
 func RunSelector(cfg *config.Config) error {
@@ -163,8 +164,8 @@ func (s *LogSelector) loop() error {
 					}
 				} else if btn == 0 { // Left click press
 					r := y - 3
-					if r >= 0 && r < len(s.filtered) {
-						s.selected = r
+					if idx := clickRowToIndex(r, s.listScroll, len(s.filtered)); idx >= 0 {
+						s.selected = idx
 					}
 				}
 			}
@@ -231,8 +232,11 @@ func (s *LogSelector) loop() error {
 						if err != nil {
 							return err
 						}
-						// Clear screen and redraw selector
-						_, _ = os.Stdout.Write([]byte("\x1b[?1049h\x1b[?25l\x1b[2J"))
+						// Clear screen and redraw selector. The sub-viewer disabled
+						// mouse tracking on its own exit, so it must be re-enabled
+						// here or wheel/click navigation stays dead for the rest of
+						// the selector's lifetime.
+						_, _ = os.Stdout.Write([]byte("\x1b[?1049h\x1b[?25l\x1b[2J\x1b[?1000h\x1b[?1006h"))
 						time.Sleep(50 * time.Millisecond)
 						if viewErr != nil {
 							fmt.Fprintf(os.Stderr, "\r\n[kuroko] viewer error: %v\r\n", viewErr)
@@ -282,6 +286,7 @@ func (s *LogSelector) draw() {
 	out.WriteString("\x1b[H")
 
 	bodyHeight := s.bodyHeight()
+	s.listScroll = followSelection(s.selected, s.listScroll, bodyHeight)
 
 	// Draw Header
 	header := fmt.Sprintf(" kuroko logs selector  [ Dir: %s ]", s.logDir)
@@ -294,10 +299,11 @@ func (s *LogSelector) draw() {
 	// Render items
 	for r := 0; r < bodyHeight; r++ {
 		var line string
-		if r < len(s.filtered) {
-			item := s.filtered[r]
+		listRow := r + s.listScroll
+		if listRow < len(s.filtered) {
+			item := s.filtered[listRow]
 			indicator := "  "
-			if r == s.selected {
+			if listRow == s.selected {
 				indicator = "> "
 			}
 
@@ -313,7 +319,7 @@ func (s *LogSelector) draw() {
 				line += strings.Repeat(" ", s.width-n)
 			}
 
-			if r == s.selected {
+			if listRow == s.selected {
 				line = fmt.Sprintf("\x1b[30;47m%s\x1b[0m", line)
 			}
 		} else {

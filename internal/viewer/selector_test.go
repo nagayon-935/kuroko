@@ -1,6 +1,7 @@
 package viewer
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -178,6 +179,41 @@ func TestSelectorDrawLongLine(t *testing.T) {
 
 // TestRunSelectorNonTerminal verifies RunSelector propagates the MakeRaw error
 // that occurs when stdin is not a TTY (which is always the case under go test).
+// TestSelectorDrawScrollsToKeepSelectionVisible mirrors
+// TestViewerDrawScrollsToKeepSelectionVisible for LogSelector's single log
+// list: before the C1 fix, draw() always rendered items[0:bodyHeight]
+// regardless of s.selected, so a selection past the visible window was
+// never shown.
+func TestSelectorDrawScrollsToKeepSelectionVisible(t *testing.T) {
+	tmp := t.TempDir()
+	const numLogs = 30 // comfortably exceeds the default 80x24 fallback's ~21-row body
+	for i := 0; i < numLogs; i++ {
+		name := fmt.Sprintf("20260618_%03d_target.log", i)
+		if err := os.WriteFile(filepath.Join(tmp, name), []byte("log"), 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+
+	s, err := newSelector(tmp)
+	if err != nil {
+		t.Fatalf("newSelector(): %v", err)
+	}
+	if len(s.filtered) != numLogs {
+		t.Fatalf("expected %d items, got %d", numLogs, len(s.filtered))
+	}
+
+	s.selected = len(s.filtered) - 1 // select the last item
+
+	restore := captureStdout(t)
+	s.draw()
+	output := restore()
+
+	lastName := s.filtered[s.selected].name
+	if !strings.Contains(output, lastName) {
+		t.Errorf("draw() output missing selected item %q; scrolling did not bring it into view", lastName)
+	}
+}
+
 func TestRunSelectorNonTerminal(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := &config.Config{LogDir: tmp}

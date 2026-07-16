@@ -3,12 +3,34 @@ package viewer
 import (
 	"compress/gzip"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
 )
+
+// captureStdout temporarily redirects os.Stdout to an in-memory pipe so a
+// draw() call's rendered output can be inspected. draw() only needs
+// os.Stdout to be a valid io.Writer (not a real terminal), so this works
+// without a PTY.
+func captureStdout(t *testing.T) func() string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe(): %v", err)
+	}
+	orig := os.Stdout
+	os.Stdout = w
+	return func() string {
+		os.Stdout = orig
+		w.Close()
+		data, _ := io.ReadAll(r)
+		r.Close()
+		return string(data)
+	}
+}
 
 // testLogContent matches the format written by internal/logger.
 const testLogContent = `# kuroko session log
@@ -247,6 +269,43 @@ func TestViewerDrawLongOutputTruncation(t *testing.T) {
 	v.draw()
 }
 
+// TestViewerDrawScrollsToKeepSelectionVisible proves the timeline pane
+// scrolls to reveal the selected command when it falls outside the first
+// screenful of rows. Before the C1 fix, draw() always rendered
+// filteredIdx[0:bodyHeight] regardless of v.selected, so a selection past
+// the visible window was never shown no matter how far navigation moved.
+func TestViewerDrawScrollsToKeepSelectionVisible(t *testing.T) {
+	var sb strings.Builder
+	const numCmds = 30 // comfortably exceeds the default 80x24 fallback's ~21-row body
+	for i := 0; i < numCmds; i++ {
+		fmt.Fprintf(&sb, "# kuroko:cmd:2026-06-18T12:%02d:00+09:00\nuser@host:~$ cmd%d\nout%d\n\n", i, i, i)
+	}
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "many.log")
+	if err := os.WriteFile(logPath, []byte(sb.String()), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	v, err := newViewer(logPath)
+	if err != nil {
+		t.Fatalf("newViewer(): %v", err)
+	}
+	if len(v.allCmds) != numCmds {
+		t.Fatalf("expected %d commands, got %d", numCmds, len(v.allCmds))
+	}
+
+	v.selected = len(v.filteredIdx) - 1 // select the last command
+
+	restore := captureStdout(t)
+	v.draw()
+	output := restore()
+
+	lastCmd := v.allCmds[v.filteredIdx[v.selected]].Command
+	if !strings.Contains(output, lastCmd) {
+		t.Errorf("draw() output missing selected command %q; scrolling did not bring it into view", lastCmd)
+	}
+}
+
 // TestViewerRunNonTerminal calls Run on a real log file; in go test, stdin is
 // not a TTY so loop() fails immediately at term.MakeRaw, returning an error.
 func TestViewerRunNonTerminal(t *testing.T) {
@@ -362,6 +421,22 @@ func TestHighlightQuery(t *testing.T) {
 					tt.line, tt.query, tt.isActive, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestHighlightQueryCaseFoldingByteLengthMismatch covers a line containing
+// U+212A (KELVIN SIGN), whose strings.ToLower result ("k", 1 byte) is
+// shorter than the original rune's UTF-8 encoding (3 bytes). Before the C3
+// fix, highlightQuery located the match in the lowercased copy and sliced
+// that byte offset directly into the original (differently-sized) string,
+// which can panic with "slice bounds out of range" or slice mid-rune. The
+// fix must produce valid UTF-8 and never panic, regardless of the exact
+// highlighting choice for this edge case.
+func TestHighlightQueryCaseFoldingByteLengthMismatch(t *testing.T) {
+	line := "Kelvin" // "Kelvin" spelled with the Kelvin sign as the leading rune
+	got := highlightQuery(line, "k", false)
+	if !utf8.ValidString(got) {
+		t.Errorf("highlightQuery(%q, %q, false) = %q; not valid UTF-8", line, "k", got)
 	}
 }
 

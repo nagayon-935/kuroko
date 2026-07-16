@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"golang.org/x/term"
@@ -78,6 +79,7 @@ type Viewer struct {
 	height             int
 	activePane         Pane
 	outputScroll       int
+	timelineScroll     int
 	currentOutputLines []string
 }
 
@@ -200,36 +202,56 @@ func (v *Viewer) scrollToLine(targetLine int, bodyHeight int) {
 	}
 }
 
+// highlightQuery wraps case-insensitive matches of query in line with ANSI
+// highlight codes. Matching is done rune-by-rune with unicode.ToLower rather
+// than via strings.ToLower(line) + strings.Index: ToLower can change a
+// string's byte length (e.g. U+212A KELVIN SIGN → "k"), which would make an
+// index found in the lowercased copy invalid to slice directly out of the
+// original (differently-sized) string — a byte-offset table keyed by rune
+// position keeps every slice bound valid by construction.
 func highlightQuery(line string, query string, isActive bool) string {
 	if query == "" {
 		return line
 	}
-	lowerLine := strings.ToLower(line)
-	lowerQuery := strings.ToLower(query)
+	queryRunes := []rune(query)
+	lineRunes := []rune(line)
+
+	byteOffsets := make([]int, len(lineRunes)+1)
+	offset := 0
+	for i, r := range lineRunes {
+		byteOffsets[i] = offset
+		offset += utf8.RuneLen(r)
+	}
+	byteOffsets[len(lineRunes)] = offset
 
 	var result strings.Builder
-	lastIdx := 0
-
-	for {
-		idx := strings.Index(lowerLine[lastIdx:], lowerQuery)
-		if idx == -1 {
-			result.WriteString(line[lastIdx:])
-			break
+	lastByte := 0
+	for i := 0; i <= len(lineRunes)-len(queryRunes); i++ {
+		if !runesEqualFold(lineRunes[i:i+len(queryRunes)], queryRunes) {
+			continue
 		}
-
-		actualIdx := lastIdx + idx
-		result.WriteString(line[lastIdx:actualIdx])
-
-		matchText := line[actualIdx : actualIdx+len(query)]
+		startByte, endByte := byteOffsets[i], byteOffsets[i+len(queryRunes)]
+		result.WriteString(line[lastByte:startByte])
+		matchText := line[startByte:endByte]
 		if isActive {
-			result.WriteString(fmt.Sprintf("\x1b[30;42m%s\x1b[0m", matchText))
+			fmt.Fprintf(&result, "\x1b[30;42m%s\x1b[0m", matchText)
 		} else {
-			result.WriteString(fmt.Sprintf("\x1b[30;43m%s\x1b[0m", matchText))
+			fmt.Fprintf(&result, "\x1b[30;43m%s\x1b[0m", matchText)
 		}
-
-		lastIdx = actualIdx + len(query)
+		lastByte = endByte
+		i += len(queryRunes) - 1
 	}
+	result.WriteString(line[lastByte:])
 	return result.String()
+}
+
+func runesEqualFold(a, b []rune) bool {
+	for i := range a {
+		if unicode.ToLower(a[i]) != unicode.ToLower(b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func (v *Viewer) parseMetadata() {
@@ -371,8 +393,8 @@ func (v *Viewer) loop() error {
 					r := y - 3
 					if x <= leftWidth {
 						v.activePane = PaneTimeline
-						if r >= 0 && r < len(v.filteredIdx) {
-							v.selected = r
+						if idx := clickRowToIndex(r, v.timelineScroll, len(v.filteredIdx)); idx >= 0 {
+							v.selected = idx
 							v.updateOutput()
 						}
 					} else if x > leftWidth+1 {
@@ -609,6 +631,7 @@ func (v *Viewer) draw() {
 	}
 	rightWidth := v.width - leftWidth - 1 // -1 for border
 	bodyHeight := v.bodyHeight()
+	v.timelineScroll = followSelection(v.selected, v.timelineScroll, bodyHeight)
 
 	// Draw Header with active pane indicator
 	paneStr := " PANE: [Timeline]  Output"
@@ -628,8 +651,9 @@ func (v *Viewer) draw() {
 	for r := 0; r < bodyHeight; r++ {
 		// 1. Left pane (Timeline list of commands)
 		var leftText string
-		if r < len(v.filteredIdx) {
-			cmdIdx := v.filteredIdx[r]
+		timelineRow := r + v.timelineScroll
+		if timelineRow < len(v.filteredIdx) {
+			cmdIdx := v.filteredIdx[timelineRow]
 			cmd := v.allCmds[cmdIdx]
 
 			// Format timestamp
@@ -639,7 +663,7 @@ func (v *Viewer) draw() {
 			}
 
 			indicator := "  "
-			if r == v.selected {
+			if timelineRow == v.selected {
 				indicator = "> "
 			}
 
@@ -650,7 +674,7 @@ func (v *Viewer) draw() {
 				leftText += strings.Repeat(" ", leftWidth-n)
 			}
 
-			if r == v.selected {
+			if timelineRow == v.selected {
 				// Highlight selected line in timeline
 				leftText = fmt.Sprintf("\x1b[30;47m%s\x1b[0m", leftText)
 			}
