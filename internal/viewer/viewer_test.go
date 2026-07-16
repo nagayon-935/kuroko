@@ -6,10 +6,22 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/ryu/kuroko/internal/textwidth"
 )
+
+// ansiEscapeRegexp strips SGR/CSI escape sequences (colors, cursor moves,
+// line-clear) from captured draw() output so tests can inspect the plain
+// text that would actually occupy terminal columns.
+var ansiEscapeRegexp = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
+
+func stripANSI(s string) string {
+	return ansiEscapeRegexp.ReplaceAllString(s, "")
+}
 
 // captureStdout temporarily redirects os.Stdout to an in-memory pipe so a
 // draw() call's rendered output can be inspected. draw() only needs
@@ -568,11 +580,12 @@ func TestTruncateDisplay(t *testing.T) {
 		{"ascii truncates with ellipsis", "abcdefghij", 5, "ab..."},
 		{
 			"multi-byte input truncates on rune boundaries, not bytes",
-			// Each 接/続/先 is a 3-byte UTF-8 rune; byte-slicing at a
-			// non-multiple-of-3 offset would previously corrupt this.
+			// Each 接/続/先 is a 3-byte, display-width-2 UTF-8 rune; only
+			// one fits within the 2-column budget left after reserving 3
+			// columns for "...".
 			"接続先router1",
 			5,
-			"接続...",
+			"接...",
 		},
 		{"multi-byte input shorter than width is unchanged", "接続先", 10, "接続先"},
 		{"width of exactly 3 truncates with no room for ellipsis", "abcdefgh", 3, "abc"},
@@ -580,6 +593,16 @@ func TestTruncateDisplay(t *testing.T) {
 		{"width zero returns empty string", "abcdefgh", 0, ""},
 		{"negative width returns empty string", "abcdefgh", -1, ""},
 		{"empty input returns empty string", "", 5, ""},
+		{
+			// C4: wide characters occupy 2 terminal columns, so truncation
+			// must be based on display width, not rune count, or the right
+			// border of the pane drifts out of alignment.
+			"wide characters truncate by display width, not rune count",
+			"漢字テスト",
+			4,
+			"...",
+		},
+		{"wide characters exactly filling width are unchanged", "漢字", 4, "漢字"},
 	}
 
 	for _, tt := range tests {
@@ -593,6 +616,47 @@ func TestTruncateDisplay(t *testing.T) {
 			if !utf8.ValidString(got) {
 				t.Errorf("truncateDisplay(%q, %d) = %q; not valid UTF-8", tt.input, tt.width, got)
 			}
+			if tt.width > 0 {
+				if n := textwidth.String(got); n > tt.width {
+					t.Errorf("truncateDisplay(%q, %d) = %q; display width %d exceeds requested width %d", tt.input, tt.width, got, n, tt.width)
+				}
+			}
 		})
+	}
+}
+
+// TestViewerDrawHeaderAndFooterAlignWithWideCharacters proves the header and
+// footer bars (which embed a file path and, while filtering, the user's
+// search query) pad and truncate by terminal display width rather than byte
+// length. Before the C4 fix, header/footer construction used len() (bytes)
+// and a raw header[:v.width] byte slice, which drifts out of alignment or
+// slices mid-rune whenever the embedded path or query contains full-width
+// Japanese characters.
+func TestViewerDrawHeaderAndFooterAlignWithWideCharacters(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "スイッチ01.log")
+	if err := os.WriteFile(logPath, []byte(testLogContent), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	v, err := newViewer(logPath)
+	if err != nil {
+		t.Fatalf("newViewer(): %v", err)
+	}
+	v.width, v.height = 80, 24
+	v.inSearch = true
+	v.searchMode = SearchCommands
+	v.searchQuery = "接続確認スイッチ"
+
+	restore := captureStdout(t)
+	v.draw()
+	output := restore()
+
+	for i, line := range strings.Split(stripANSI(output), "\r\n") {
+		if line == "" {
+			continue
+		}
+		if n := textwidth.String(line); n != v.width {
+			t.Errorf("rendered line %d %q has display width %d; want exactly %d", i, line, n, v.width)
+		}
 	}
 }

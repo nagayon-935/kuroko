@@ -9,11 +9,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"golang.org/x/term"
 
 	"github.com/ryu/kuroko/internal/config"
+	"github.com/ryu/kuroko/internal/textwidth"
 )
 
 type selectorItem struct {
@@ -290,10 +290,12 @@ func (s *LogSelector) draw() {
 
 	// Draw Header
 	header := fmt.Sprintf(" kuroko logs selector  [ Dir: %s ]", s.logDir)
-	if len(header) < s.width {
-		header += strings.Repeat(" ", s.width-len(header))
+	if n := textwidth.String(header); n > s.width {
+		header = truncateDisplay(header, s.width)
+	} else {
+		header += strings.Repeat(" ", s.width-n)
 	}
-	out.WriteString(fmt.Sprintf("\x1b[30;47m%s\x1b[0m\x1b[K\r\n", header[:s.width]))
+	out.WriteString(fmt.Sprintf("\x1b[30;47m%s\x1b[0m\x1b[K\r\n", header))
 	out.WriteString("\x1b[K\r\n")
 
 	// Render items
@@ -313,7 +315,7 @@ func (s *LogSelector) draw() {
 
 			// Try to align nicely
 			line = fmt.Sprintf("%s[%s] (%-8s) %s", indicator, ts, sizeStr, item.name)
-			if n := utf8.RuneCountInString(line); n > s.width {
+			if n := textwidth.String(line); n > s.width {
 				line = truncateDisplay(line, s.width)
 			} else {
 				line += strings.Repeat(" ", s.width-n)
@@ -339,10 +341,12 @@ func (s *LogSelector) draw() {
 	if s.inSearch {
 		footerText = fmt.Sprintf(" Filter logs (Enter to confirm): %s_", s.searchQuery)
 	}
-	if len(footerText) < s.width {
-		footerText += strings.Repeat(" ", s.width-len(footerText))
+	if n := textwidth.String(footerText); n > s.width {
+		footerText = truncateDisplay(footerText, s.width)
+	} else {
+		footerText += strings.Repeat(" ", s.width-n)
 	}
-	out.WriteString(fmt.Sprintf("\x1b[30;47m%s\x1b[0m\x1b[K", footerText[:s.width]))
+	out.WriteString(fmt.Sprintf("\x1b[30;47m%s\x1b[0m\x1b[K", footerText))
 
 	os.Stdout.Write(out.Bytes())
 }

@@ -17,28 +17,43 @@ import (
 	"golang.org/x/term"
 
 	"github.com/ryu/kuroko/internal/logger"
+	"github.com/ryu/kuroko/internal/textwidth"
 )
 
 // chromeHeight is the number of terminal rows consumed by the header, the
 // blank spacer line, and the footer, leaving the remainder for the body.
 const chromeHeight = 3
 
-// truncateDisplay truncates s to at most width runes, appending "..." when
-// truncated. It slices by rune rather than by byte so multi-byte UTF-8
-// content (e.g. Japanese hostnames or device output) is never cut mid-rune,
-// which would otherwise emit invalid UTF-8 to the terminal.
+// truncateDisplay truncates s to at most width terminal columns, appending
+// "..." when truncated. Width is measured with textwidth.String rather than
+// rune count, since East Asian Wide/Fullwidth characters (e.g. Japanese
+// hostnames or device output) occupy two columns each; truncating by rune
+// count alone drifts the pane's right border out of alignment. Truncation
+// always stops on a rune boundary, so the result is valid UTF-8.
 func truncateDisplay(s string, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	r := []rune(s)
-	if len(r) <= width {
+	if textwidth.String(s) <= width {
 		return s
 	}
-	if width <= 3 {
-		return string(r[:width])
+	budget := width
+	suffix := ""
+	if width > 3 {
+		budget = width - 3
+		suffix = "..."
 	}
-	return string(r[:width-3]) + "..."
+	var b strings.Builder
+	col := 0
+	for _, r := range s {
+		w := textwidth.Rune(r)
+		if col+w > budget {
+			break
+		}
+		b.WriteRune(r)
+		col += w
+	}
+	return b.String() + suffix
 }
 
 type CommandMetadata struct {
@@ -639,10 +654,12 @@ func (v *Viewer) draw() {
 		paneStr = " PANE:  Timeline  [Output]"
 	}
 	header := fmt.Sprintf(" kuroko log viewer  [ File: %s ]%s", filepath.Base(v.logPath), paneStr)
-	if len(header) < v.width {
-		header += strings.Repeat(" ", v.width-len(header))
+	if n := textwidth.String(header); n > v.width {
+		header = truncateDisplay(header, v.width)
+	} else {
+		header += strings.Repeat(" ", v.width-n)
 	}
-	out.WriteString(fmt.Sprintf("\x1b[30;47m%s\x1b[0m\x1b[K\r\n", header[:v.width]))
+	out.WriteString(fmt.Sprintf("\x1b[30;47m%s\x1b[0m\x1b[K\r\n", header))
 
 	// Draw Empty line between header and body
 	out.WriteString("\x1b[K\r\n")
@@ -668,7 +685,7 @@ func (v *Viewer) draw() {
 			}
 
 			leftText = fmt.Sprintf("%s[%s] %s", indicator, ts, cmd.Command)
-			if n := utf8.RuneCountInString(leftText); n > leftWidth {
+			if n := textwidth.String(leftText); n > leftWidth {
 				leftText = truncateDisplay(leftText, leftWidth)
 			} else {
 				leftText += strings.Repeat(" ", leftWidth-n)
@@ -706,7 +723,7 @@ func (v *Viewer) draw() {
 			}
 
 			truncated := line
-			if n := utf8.RuneCountInString(line); n > rightWidth {
+			if n := textwidth.String(line); n > rightWidth {
 				truncated = truncateDisplay(line, rightWidth)
 			} else {
 				truncated = line + strings.Repeat(" ", rightWidth-n)
@@ -747,10 +764,12 @@ func (v *Viewer) draw() {
 			footerText = fmt.Sprintf(" Find in output (Enter to confirm): %s_", v.searchQuery)
 		}
 	}
-	if len(footerText) < v.width {
-		footerText += strings.Repeat(" ", v.width-len(footerText))
+	if n := textwidth.String(footerText); n > v.width {
+		footerText = truncateDisplay(footerText, v.width)
+	} else {
+		footerText += strings.Repeat(" ", v.width-n)
 	}
-	out.WriteString(fmt.Sprintf("\x1b[30;47m%s\x1b[0m\x1b[K", footerText[:v.width]))
+	out.WriteString(fmt.Sprintf("\x1b[30;47m%s\x1b[0m\x1b[K", footerText))
 
 	os.Stdout.Write(out.Bytes())
 }
