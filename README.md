@@ -9,24 +9,48 @@
 
 ## インストール
 
-### 必要なもの
+### Releases からインストール（推奨）
 
-- Go 1.22 以上
-
-### ビルド
+[Releases](https://github.com/nagayon-935/kuroko/releases) から Linux / macOS 向けのビルド済みバイナリ（`tar.gz`）を取得できます（amd64 / arm64 対応）。
 
 ```bash
-git clone https://github.com/ryu/kuroko
-cd kuroko
-make install
+# OS・アーキテクチャを判定し、最新リリースの該当アーカイブを取得
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+ARCH=$(uname -m); case "$ARCH" in x86_64) ARCH=amd64 ;; aarch64|arm64) ARCH=arm64 ;; esac
+URL=$(curl -fsSL https://api.github.com/repos/nagayon-935/kuroko/releases/latest \
+  | grep -o "https://[^\"]*_${OS}_${ARCH}.tar.gz")
+
+curl -fLO "$URL"
+tar xzf "kuroko_"*"_${OS}_${ARCH}.tar.gz" kuroko
+
+mkdir -p ~/.local/bin
+mv kuroko ~/.local/bin/
+chmod +x ~/.local/bin/kuroko
 ```
 
-`~/.local/bin/kuroko` にバイナリが配置されます。  
 PATH に含まれていない場合は以下を `~/.zshrc` または `~/.bashrc` に追加してください。
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
+
+インストール確認:
+
+```bash
+kuroko --version
+```
+
+### ソースからビルドする場合
+
+必要なもの: Go 1.22 以上
+
+```bash
+git clone https://github.com/nagayon-935/kuroko
+cd kuroko
+make install
+```
+
+`~/.local/bin/kuroko` にバイナリが配置されます。PATH の設定は上記と同様です。
 
 ## 使い方
 
