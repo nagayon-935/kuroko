@@ -17,3 +17,6 @@ logs/
 *.test
 *.out
 /dist/
+
+# Claude Code local configuration
+CLAUDE.md
