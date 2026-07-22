@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/ryu/kuroko/internal/completion"
 	"github.com/ryu/kuroko/internal/config"
 	"github.com/ryu/kuroko/internal/session"
 	"github.com/ryu/kuroko/internal/viewer"
@@ -31,8 +32,13 @@ Examples:
   kuroko bash
   kuroko logs           List saved logs
   kuroko view <logfile>  View a saved log session interactively
+  kuroko completion bash  Print a bash completion script
 
 Logs are saved to ~/.config/kuroko/logs/ by default.
+
+Shell completion (bash):
+  source <(kuroko completion bash)                                    # current shell only
+  kuroko completion bash > ~/.local/share/bash-completion/completions/kuroko  # permanent
 
 Priority: --log-dir flag > $KUROKO_LOG_DIR > config.json > default
 
@@ -95,6 +101,27 @@ func main() {
 		}
 		if err := viewer.Run(filepath.Clean(rest[1])); err != nil {
 			fatalf("viewer error: %v", err)
+		}
+		os.Exit(0)
+	case "completion":
+		shell := "bash"
+		if len(rest) >= 2 {
+			shell = rest[1]
+		}
+		if err := completion.WriteScript(os.Stdout, shell); err != nil {
+			fatalf("completion error: %v", err)
+		}
+		os.Exit(0)
+	case "__complete":
+		// Hidden helper invoked by the shell completion script; not
+		// listed in usage. rest[1:] is the already-typed context
+		// (kuroko itself and the word under the cursor excluded).
+		cfg, err := config.Load(config.Options{LogDir: logDir})
+		if err != nil {
+			os.Exit(0) // completion must never surface errors to the shell
+		}
+		for _, c := range completion.Candidates(rest[1:], cfg) {
+			fmt.Println(c)
 		}
 		os.Exit(0)
 	}

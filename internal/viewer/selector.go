@@ -13,6 +13,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/ryu/kuroko/internal/config"
+	"github.com/ryu/kuroko/internal/logstore"
 	"github.com/ryu/kuroko/internal/textwidth"
 )
 
@@ -56,28 +57,20 @@ func newSelector(logDir string) (*LogSelector, error) {
 }
 
 func (s *LogSelector) scanLogs() error {
-	entries, err := os.ReadDir(s.logDir)
+	entries, err := logstore.ListLogFiles(s.logDir)
 	if err != nil {
-		return fmt.Errorf("reading log dir: %w", err)
+		return err
 	}
 
 	var items []selectorItem
 	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".log") && !strings.HasSuffix(name, ".log.gz") {
-			continue
-		}
-
 		info, err := entry.Info()
 		if err != nil {
 			continue
 		}
 
 		items = append(items, selectorItem{
-			name:    name,
+			name:    entry.Name(),
 			modTime: info.ModTime(),
 			size:    info.Size(),
 		})

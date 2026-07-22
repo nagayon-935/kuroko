@@ -149,6 +149,28 @@ kuroko view <path_to_log_file>
     - `n` : 次の一致箇所へジャンプ（現在選択されている一致は緑色、それ以外は黄色でハイライト表示されます）
     - `N` : 前の一致箇所へジャンプ
 
+### シェル補完 (bash)
+
+`kuroko` のサブコマンド・オプション・`kuroko view` のログファイル名を bash の TAB 補完で入力できます。
+
+```bash
+# 現在のシェルだけで有効化
+source <(kuroko completion bash)
+
+# 恒久的に有効化
+kuroko completion bash > ~/.local/share/bash-completion/completions/kuroko
+# または (Homebrew の bash-completion@2 を使っている場合)
+kuroko completion bash > "$(brew --prefix)/etc/bash_completion.d/kuroko"
+```
+
+```bash
+kuroko <TAB>          # logs / view / help / completion と PATH 上のコマンドを補完
+kuroko view <TAB>     # ~/.config/kuroko/logs (または -d で指定したディレクトリ) のログファイル名を補完
+kuroko -<TAB>         # --log-dir / -d / --help / -h / --version / -v を補完
+```
+
+候補が1つなら自動で入力され、複数あれば一覧表示されます（bash 標準の補完動作）。
+
 ### ログの中身
 
 ```
@@ -293,6 +315,8 @@ kuroko/
 │   ├── logger/logger.go        # ログファイル生成
 │   ├── session/session.go      # PTY セッション制御
 │   ├── notifier/notifier.go    # 外部通知（Discord / Slack）
+│   ├── logstore/logstore.go    # ログファイルの列挙（viewer / completion で共有）
+│   ├── completion/completion.go # シェル補完の候補計算・スクリプト生成
 │   └── viewer/viewer.go        # TUI ログビューア
 ├── go.mod
 └── Makefile
