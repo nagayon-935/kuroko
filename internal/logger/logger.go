@@ -213,26 +213,46 @@ func SplitPrompt(line []byte) ([]byte, []byte) {
 	return nil, nil
 }
 
+// maxPendingRows bounds the in-memory window of committed-but-not-yet-flushed
+// rows (see pendingRows). Ink-style CLIs (Claude Code, Codex, Google's
+// Antigravity CLI, …) redraw a live region — a spinner, a bordered box, a
+// streaming panel — by moving the cursor up N lines and reprinting, without
+// ever entering the alternate screen (so vim/less-style suppression doesn't
+// apply). A generous window comfortably covers any realistic live-redraw
+// region while bounding memory for pathological input.
+const maxPendingRows = 500
+
+// pendingRow is one committed terminal row buffered in memory, not yet
+// written to disk, so that a subsequent cursor-up + reprint (see the 'A'
+// case in processEscape) can overwrite it in place instead of the redraw
+// being permanently duplicated as new lines.
+type pendingRow struct {
+	meta []byte // optional "# kuroko:cmd:...\n" metadata line preceding text; nil if none
+	text []byte // the row's rendered content, without trailing newline
+}
+
 // Logger writes session output to a file, applying ANSI stripping and a
 // terminal line-buffer simulation so the log is human-readable plain text.
 type Logger struct {
 	file             *os.File
 	rawFile          *os.File // non-nil when KUROKO_RAW_DEBUG=1; receives raw PTY bytes
 	Path             string
-	altScreen        bool   // true while a full-screen app (vim/less) owns the terminal
-	seqBuf           []byte // incomplete escape sequence carried across Write calls
-	runeBuf          []byte // incomplete UTF-8 rune carried across Write calls
-	lineBuf          []rune // current output line, one terminal column per slot (wide runes occupy two slots; see wideContinuation)
-	lineCol          int    // cursor column within lineBuf (display columns, not bytes or runes)
-	pendingCR        bool   // \r was the last control char seen; defer reset until next char
-	savedLine        []byte // lineBuf snapshot taken at the first bare \r before any overwrite
-	storedPrompt     []byte // last verified shell prompt; used to recover from readline history contamination
-	writeSeq         uint64 // monotonic counter for raw debug chunks
-	redactionEnabled bool   // true if credentials should be redacted
-	inPEMBlock       bool   // state for tracking multi-line PEM blocks
-	inEsc            bool   // true if currently parsing an ANSI escape sequence
-	escBuf           []byte // buffer for the current escape sequence
-	networkMode      bool   // true when wrapping a NW device session (ssh/telnet/screen/…)
+	altScreen        bool         // true while a full-screen app (vim/less) owns the terminal
+	seqBuf           []byte       // incomplete escape sequence carried across Write calls
+	runeBuf          []byte       // incomplete UTF-8 rune carried across Write calls
+	lineBuf          []rune       // current output line, one terminal column per slot (wide runes occupy two slots; see wideContinuation)
+	lineCol          int          // cursor column within lineBuf (display columns, not bytes or runes)
+	pendingCR        bool         // \r was the last control char seen; defer reset until next char
+	savedLine        []byte       // lineBuf snapshot taken at the first bare \r before any overwrite
+	storedPrompt     []byte       // last verified shell prompt; used to recover from readline history contamination
+	writeSeq         uint64       // monotonic counter for raw debug chunks
+	redactionEnabled bool         // true if credentials should be redacted
+	inPEMBlock       bool         // state for tracking multi-line PEM blocks
+	inEsc            bool         // true if currently parsing an ANSI escape sequence
+	escBuf           []byte       // buffer for the current escape sequence
+	networkMode      bool         // true when wrapping a NW device session (ssh/telnet/screen/…)
+	pendingRows      []pendingRow // committed rows not yet flushed to disk; see commitRow
+	cursorRow        int          // index into pendingRows the next '\n' commit lands on; == len(pendingRows) means "new row"
 	closeOnce        sync.Once
 	closeErr         error
 }
@@ -421,18 +441,15 @@ func (l *Logger) processLine(data []byte) error {
 				}
 			}
 
+			var meta []byte
 			if hasCommand {
-				// Write command metadata directly inline before writing the prompt+command.
-				metaLine := fmt.Sprintf("# kuroko:cmd:%s\n", time.Now().Format(time.RFC3339))
-				if _, err := l.file.WriteString(metaLine); err != nil {
-					return err
-				}
+				meta = []byte(fmt.Sprintf("# kuroko:cmd:%s\n", time.Now().Format(time.RFC3339)))
 			}
 
 			if l.redactionEnabled {
 				out = l.redact(out)
 			}
-			if _, err := l.file.Write(append(out, '\n')); err != nil {
+			if err := l.commitRow(pendingRow{meta: meta, text: out}); err != nil {
 				return err
 			}
 			l.lineBuf = l.lineBuf[:0]
@@ -492,6 +509,54 @@ func (l *Logger) snapshotSavedLine() {
 	}
 	l.lineCol = 0
 	l.pendingCR = false
+}
+
+// commitRow places row at the current cursor position within the pending
+// window: if the cursor was moved up via ESC[<n>A (cursorRow points at an
+// already-buffered row), it overwrites that row in place — the redraw
+// simply replaces the stale frame instead of duplicating it — otherwise it
+// appends a new row. Rows that scroll off the top of the window (beyond
+// maxPendingRows) are flushed to disk in order, since a live-redraw region
+// is never that tall in practice.
+func (l *Logger) commitRow(row pendingRow) error {
+	if l.cursorRow < len(l.pendingRows) {
+		l.pendingRows[l.cursorRow] = row
+	} else {
+		l.pendingRows = append(l.pendingRows, row)
+	}
+	l.cursorRow++
+	for len(l.pendingRows) > maxPendingRows {
+		if err := l.flushRow(l.pendingRows[0]); err != nil {
+			return err
+		}
+		l.pendingRows = l.pendingRows[1:]
+		l.cursorRow--
+	}
+	return nil
+}
+
+// flushRow writes one buffered row (and its optional metadata line) to disk.
+func (l *Logger) flushRow(row pendingRow) error {
+	if len(row.meta) > 0 {
+		if _, err := l.file.Write(row.meta); err != nil {
+			return err
+		}
+	}
+	_, err := l.file.Write(append(row.text, '\n'))
+	return err
+}
+
+// flushPendingRows writes every remaining buffered row to disk in order,
+// e.g. once the session ends and no further redraw can occur.
+func (l *Logger) flushPendingRows() error {
+	for _, row := range l.pendingRows {
+		if err := l.flushRow(row); err != nil {
+			return err
+		}
+	}
+	l.pendingRows = nil
+	l.cursorRow = 0
+	return nil
 }
 
 // wideContinuation marks the second terminal column occupied by an East
@@ -598,6 +663,28 @@ func (l *Logger) processEscape(seq []byte) {
 		if l.lineCol < 0 {
 			l.lineCol = 0
 		}
+	case 'A': // Cursor Up — re-target a previously committed, still-pending
+		// row so the next '\n' commit overwrites it in place (Ink-style
+		// redraw) instead of appending a duplicate line.
+		l.cursorRow -= n
+		if l.cursorRow < 0 {
+			l.cursorRow = 0
+		}
+	case 'B': // Cursor Down
+		l.cursorRow += n
+		if l.cursorRow > len(l.pendingRows) {
+			l.cursorRow = len(l.pendingRows)
+		}
+	case 'J': // Erase in Display — drop buffered rows the redraw is about
+		// to overwrite (param 0/none) or the whole pending window (2/3).
+		if paramsStr == "" || paramsStr == "0" {
+			if l.cursorRow < len(l.pendingRows) {
+				l.pendingRows = l.pendingRows[:l.cursorRow]
+			}
+		} else if paramsStr == "2" || paramsStr == "3" {
+			l.pendingRows = l.pendingRows[:0]
+			l.cursorRow = 0
+		}
 	case 'P': // Delete character(s) at cursor
 		if l.lineCol < len(l.lineBuf) {
 			// Shift remaining characters left by n
@@ -624,6 +711,12 @@ func (l *Logger) Close(exitCode int) error {
 }
 
 func (l *Logger) doClose(exitCode int) error {
+	// Flush any rows still buffered for a possible cursor-up redraw — the
+	// session is ending, so no further redraw can occur.
+	if err := l.flushPendingRows(); err != nil {
+		return err
+	}
+
 	// Flush any unterminated line; apply the same savedLine validation as processLine.
 	end := l.lineCol
 	if end > len(l.lineBuf) {

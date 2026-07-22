@@ -1474,6 +1474,65 @@ func TestLoggerJapaneseCursorMovementCSID(t *testing.T) {
 	}
 }
 
+// TestLoggerCursorUpRedrawCollapsed reproduces the live-redraw pattern used
+// by Ink-style CLIs (e.g. Google's Antigravity CLI): a multi-line block is
+// printed, then the cursor moves back up to the block's first line
+// (ESC[<n>A) and reprints it with slightly different content, without ever
+// entering the alternate screen. Before the fix, cursor-up was a no-op, so
+// every redraw frame was permanently committed as new lines — a single
+// animated box could balloon a session log to tens of thousands of
+// duplicate lines. The logger must instead treat the redrawn block as an
+// in-place overwrite of the still-pending (not yet flushed) rows.
+func TestLoggerCursorUpRedrawCollapsed(t *testing.T) {
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host"}, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	frame := func(width int) string {
+		return "line-a\nline-b\n" + strings.Repeat("-", width) + "\n"
+	}
+
+	// First frame: 3 lines.
+	l.Write([]byte(frame(20)))
+	// Redraw: move cursor up 3 lines and reprint with a narrower separator.
+	l.Write([]byte("\x1b[3A"))
+	l.Write([]byte(frame(10)))
+	// Redraw again, narrower still — the final settled frame.
+	l.Write([]byte("\x1b[3A"))
+	l.Write([]byte(frame(5)))
+	l.Close(0)
+
+	data, err := os.ReadFile(l.Path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	content := string(data)
+	lines := strings.Split(content, "\n")
+
+	if got := strings.Count(content, "line-a"); got != 1 {
+		t.Errorf("expected exactly one settled 'line-a', got %d occurrences:\n%s", got, content)
+	}
+
+	wantLine := strings.Repeat("-", 5)
+	staleLines := []string{strings.Repeat("-", 20), strings.Repeat("-", 10)}
+	found := false
+	for _, ln := range lines {
+		if ln == wantLine {
+			found = true
+		}
+		for _, stale := range staleLines {
+			if ln == stale {
+				t.Errorf("stale redraw frame line %q should not survive in log:\n%s", stale, content)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected final settled separator line %q in log:\n%s", wantLine, content)
+	}
+}
+
 // TestLoggerJapaneseMidLineInsertion covers B1's "mid-line insertion" case:
 // a shell that doesn't use insert/delete-character escapes typically
 // redraws by moving the cursor back and retyping from the insertion point
