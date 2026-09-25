@@ -168,3 +168,39 @@ func TestLoadInvalidJSON(t *testing.T) {
 		t.Error("expected error for invalid JSON, got nil")
 	}
 }
+
+func TestResolveDoesNotCreateLogDir(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("KUROKO_LOG_DIR", "")
+	logDir := filepath.Join(tmp, "absent")
+
+	cfg, err := Resolve(Options{LogDir: logDir})
+	if err != nil {
+		t.Fatalf("Resolve() error: %v", err)
+	}
+
+	if cfg.LogDir != logDir {
+		t.Errorf("LogDir = %q, want %q", cfg.LogDir, logDir)
+	}
+	if _, err := os.Stat(logDir); !os.IsNotExist(err) {
+		t.Errorf("Resolve() created %q (Stat err = %v); want it absent", logDir, err)
+	}
+}
+
+func TestResolveReportsMalformedConfig(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("KUROKO_LOG_DIR", "")
+	configDir := filepath.Join(tmp, ".config", "kuroko")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte("{broken"), 0o600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	if _, err := Resolve(Options{}); err == nil {
+		t.Fatal("Resolve() expected error for malformed config.json, got nil")
+	}
+}

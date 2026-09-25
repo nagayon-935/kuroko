@@ -42,9 +42,74 @@ func TestCandidates(t *testing.T) {
 			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log"},
 		},
 		{
-			name: "logs subcommand offers only global flags",
+			name: "logs subcommand offers nothing (flags after it are ignored)",
 			ctx:  []string{"logs"},
-			want: []string{"--log-dir", "-d", "--help", "-h", "--version", "-v"},
+			want: nil,
+		},
+		{
+			name: "help subcommand offers nothing",
+			ctx:  []string{"help"},
+			want: nil,
+		},
+		{
+			name: "view takes a single file: nothing after its argument",
+			ctx:  []string{"view", "-d", otherDir},
+			want: nil,
+		},
+		{
+			name: "completion takes a single shell: nothing after it",
+			ctx:  []string{"completion", "bash"},
+			want: nil,
+		},
+		{
+			name: "--log-dir=DIR single token redirects view completion",
+			ctx:  []string{"--log-dir=" + otherDir, "view"},
+			want: []string{"20260101_010000_bash.log"},
+		},
+		{
+			name: "--log-dir = DIR split by COMP_WORDBREAKS redirects view completion",
+			ctx:  []string{"--log-dir", "=", otherDir, "view"},
+			want: []string{"20260101_010000_bash.log"},
+		},
+		{
+			name: "single-dash -log-dir form redirects view completion",
+			ctx:  []string{"-log-dir", otherDir, "view"},
+			want: []string{"20260101_010000_bash.log"},
+		},
+		{
+			name: "help flag short-circuits: main prints usage and exits",
+			ctx:  []string{"-h", "view"},
+			want: nil,
+		},
+		{
+			name: "version flag short-circuits",
+			ctx:  []string{"--version", "view"},
+			want: nil,
+		},
+		{
+			name: "help flag explicitly set false does not short-circuit",
+			ctx:  []string{"--help=false", "view"},
+			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log"},
+		},
+		{
+			name: "empty log-dir value falls back to configured dir (like config.Load)",
+			ctx:  []string{"--log-dir=", "view"},
+			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log"},
+		},
+		{
+			name: "last log-dir wins, and an empty last value means configured dir",
+			ctx:  []string{"-d", otherDir, "-d=", "view"},
+			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log"},
+		},
+		{
+			name: "last non-empty log-dir wins",
+			ctx:  []string{"-d", "/nonexistent", "-d", otherDir, "view"},
+			want: []string{"20260101_010000_bash.log"},
+		},
+		{
+			name: "double dash terminates flags",
+			ctx:  []string{"--", "view"},
+			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log"},
 		},
 		{
 			name: "completion subcommand lists supported shells",

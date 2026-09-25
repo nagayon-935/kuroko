@@ -4,10 +4,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/ryu/kuroko/internal/completion"
 	"github.com/ryu/kuroko/internal/config"
+	"github.com/ryu/kuroko/internal/logstore"
 	"github.com/ryu/kuroko/internal/session"
 	"github.com/ryu/kuroko/internal/viewer"
 )
@@ -99,7 +99,19 @@ func main() {
 		if len(rest) < 2 {
 			fatalf("usage: kuroko view <logfile>")
 		}
-		if err := viewer.Run(filepath.Clean(rest[1])); err != nil {
+		// A bare name (e.g. from shell completion) falls back to the log
+		// dir. Resolve, not Load: viewing must not create directories.
+		path, err := logstore.ResolveLogFile(rest[1], func() (string, error) {
+			cfg, err := config.Resolve(config.Options{LogDir: logDir})
+			if err != nil {
+				return "", err
+			}
+			return cfg.LogDir, nil
+		})
+		if err != nil {
+			fatalf("config error: %v", err)
+		}
+		if err := viewer.Run(path); err != nil {
 			fatalf("viewer error: %v", err)
 		}
 		os.Exit(0)
@@ -116,7 +128,7 @@ func main() {
 		// Hidden helper invoked by the shell completion script; not
 		// listed in usage. rest[1:] is the already-typed context
 		// (kuroko itself and the word under the cursor excluded).
-		cfg, err := config.Load(config.Options{LogDir: logDir})
+		cfg, err := config.Resolve(config.Options{LogDir: logDir})
 		if err != nil {
 			os.Exit(0) // completion must never surface errors to the shell
 		}

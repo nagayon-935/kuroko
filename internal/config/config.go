@@ -54,9 +54,25 @@ type Options struct {
 	LogDir string // --log-dir / -d
 }
 
-// Load reads config from file and environment, then applies opt overrides.
-// Priority: CLI flag > env var > config.json > default.
+// Load resolves the config (see Resolve) and ensures the log directory
+// exists, creating it with 0700 permissions if needed.
 func Load(opt Options) (*Config, error) {
+	cfg, err := Resolve(opt)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := os.MkdirAll(cfg.LogDir, 0o700); err != nil {
+		return nil, fmt.Errorf("mkdir %s: %w", cfg.LogDir, err)
+	}
+
+	return cfg, nil
+}
+
+// Resolve reads config from file and environment, then applies opt
+// overrides, without touching the filesystem beyond reading config.json.
+// Priority: CLI flag > env var > config.json > default.
+func Resolve(opt Options) (*Config, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
@@ -108,10 +124,6 @@ func Load(opt Options) (*Config, error) {
 	// 3. CLI flags (highest priority)
 	if opt.LogDir != "" {
 		cfg.LogDir = opt.LogDir
-	}
-
-	if err := os.MkdirAll(cfg.LogDir, 0o700); err != nil {
-		return nil, fmt.Errorf("mkdir %s: %w", cfg.LogDir, err)
 	}
 
 	return cfg, nil
