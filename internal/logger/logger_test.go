@@ -156,19 +156,26 @@ func TestResolveSSHHostnameEmpty(t *testing.T) {
 	}
 }
 
-func TestUniquePath(t *testing.T) {
+func TestCreateLogFile(t *testing.T) {
 	tmp := t.TempDir()
 
-	// First call: file doesn't exist — no suffix.
-	p1 := uniquePath(tmp, "session.log")
+	create := func() string {
+		t.Helper()
+		f, err := createLogFile(tmp, "session.log")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return f.Name()
+	}
+	p1 := create()
 	if !strings.HasSuffix(p1, "session.log") {
 		t.Errorf("first path %q should end with session.log", p1)
 	}
 
-	// Create the file so the next call must produce a different name.
-	os.WriteFile(p1, []byte{}, 0o600)
-
-	p2 := uniquePath(tmp, "session.log")
+	p2 := create()
 	if p2 == p1 {
 		t.Errorf("second path should differ from first, got %q", p2)
 	}
@@ -176,9 +183,7 @@ func TestUniquePath(t *testing.T) {
 		t.Errorf("second path %q should end with session_1.log", p2)
 	}
 
-	// Create that too — third should be _2.
-	os.WriteFile(p2, []byte{}, 0o600)
-	p3 := uniquePath(tmp, "session.log")
+	p3 := create()
 	if !strings.HasSuffix(p3, "session_2.log") {
 		t.Errorf("third path %q should end with session_2.log", p3)
 	}

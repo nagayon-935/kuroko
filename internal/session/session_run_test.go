@@ -2,8 +2,12 @@ package session
 
 import (
 	"errors"
+	"os"
 	"os/exec"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/ryu/kuroko/internal/config"
 )
@@ -15,6 +19,79 @@ func TestWaitResultNilError(t *testing.T) {
 	}
 	if code != 0 {
 		t.Errorf("code = %d; want 0", code)
+	}
+}
+
+type fileCheckingNotifier struct {
+	endCalls int
+	path     string
+	err      error
+}
+
+func (n *fileCheckingNotifier) NotifyStart(string) error { return nil }
+
+func (n *fileCheckingNotifier) NotifyEnd(path, command string, code int, duration time.Duration) error {
+	n.endCalls++
+	n.path = path
+	_, n.err = os.Stat(path)
+	return n.err
+}
+
+func TestFinishNotifiesBeforeRotation(t *testing.T) {
+	cfg := &config.Config{
+		LogDir: t.TempDir(),
+		Storage: config.StorageConfig{Rotation: config.RotationConfig{
+			Enabled: true, MaxTotalSizeMB: 1,
+		}},
+	}
+	s, err := New(cfg, []string{"bash"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.log.Close(0) })
+	// A sparse log larger than the size cap will be removed by rotation.
+	if err := os.Truncate(s.log.Path, 2*1024*1024); err != nil {
+		t.Fatal(err)
+	}
+	n := &fileCheckingNotifier{}
+	s.notifier = n
+	s.start = time.Now()
+	s.finish(0)
+	if n.endCalls != 1 || n.err != nil {
+		t.Fatalf("notification must read log before rotation: calls=%d, err=%v", n.endCalls, n.err)
+	}
+	if _, err := os.Stat(s.log.Path); !os.IsNotExist(err) {
+		t.Fatalf("rotation did not finish: %v", err)
+	}
+}
+
+func TestFinishConcurrentCallsCompressAndNotifyOnce(t *testing.T) {
+	cfg := &config.Config{
+		LogDir:  t.TempDir(),
+		Storage: config.StorageConfig{CompressOnClose: true},
+	}
+	s, err := New(cfg, []string{"bash"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.log.Close(0) })
+	n := &fileCheckingNotifier{}
+	s.notifier = n
+	s.start = time.Now()
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.finish(0)
+		}()
+	}
+	wg.Wait()
+	if n.endCalls != 1 || n.err != nil || !strings.HasSuffix(n.path, ".log.gz") {
+		t.Fatalf("completed log notification: calls=%d, path=%s, err=%v", n.endCalls, n.path, n.err)
+	}
+	if _, err := os.Stat(s.log.Path); !os.IsNotExist(err) {
+		t.Fatalf("uncompressed source still exists: %v", err)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -19,12 +20,13 @@ import (
 )
 
 type Session struct {
-	cfg      *config.Config
-	args     []string
-	log      *logger.Logger
-	notifier notifier.Notifier
-	cmd      *exec.Cmd // set once the child process starts; read by terminateForSignal to propagate termination signals
-	start    time.Time // set at the beginning of Run(); read by terminateForSignal to compute NotifyEnd's duration
+	cfg        *config.Config
+	args       []string
+	log        *logger.Logger
+	notifier   notifier.Notifier
+	cmd        *exec.Cmd // set once the child process starts; read by terminateForSignal to propagate termination signals
+	start      time.Time // set at the beginning of Run(); read by terminateForSignal to compute NotifyEnd's duration
+	finishOnce sync.Once // normal exit and signal cleanup share one finalization
 }
 
 func New(cfg *config.Config, args []string) (*Session, error) {
@@ -59,14 +61,25 @@ func (s *Session) Run() (int, error) {
 
 	s.start = time.Now()
 	exitCode, err := s.runWithPTY()
-	duration := time.Since(s.start)
+	s.finish(exitCode)
+	return exitCode, err
+}
 
-	if cerr := s.log.Close(exitCode); cerr != nil {
-		fmt.Fprintf(os.Stderr, "\033[33m[kuroko] log close error: %v\033[0m\n", cerr)
+// finish completes the log and notification before rotating saved files.
+// It must finish before main calls os.Exit, which does not wait for goroutines.
+func (s *Session) finish(exitCode int) {
+	s.finishOnce.Do(func() { s.finishLog(exitCode) })
+}
+
+func (s *Session) finishLog(exitCode int) {
+	duration := time.Since(s.start)
+	closeErr := s.log.Close(exitCode)
+	if closeErr != nil {
+		fmt.Fprintf(os.Stderr, "\033[33m[kuroko] log close error: %v\033[0m\n", closeErr)
 	}
 
 	logPath := s.log.Path
-	if s.cfg.Storage.CompressOnClose {
+	if closeErr == nil && s.cfg.Storage.CompressOnClose {
 		shouldCompress := true
 		if s.cfg.Storage.CompressThresholdMB > 0 {
 			if info, err := os.Stat(s.log.Path); err == nil {
@@ -84,20 +97,15 @@ func (s *Session) Run() (int, error) {
 		}
 	}
 
-	if s.cfg.Storage.Rotation.Enabled {
-		// Run GC in background so we don't block terminal exit.
-		go func() {
-			if rerr := logger.RotateLogs(s.cfg.LogDir, s.cfg.Storage.Rotation.MaxAgeDays, s.cfg.Storage.Rotation.MaxTotalSizeMB); rerr != nil {
-				fmt.Fprintf(os.Stderr, "\033[33m[kuroko] log rotation error: %v\033[0m\n", rerr)
-			}
-		}()
-	}
-
-	if nerr := s.notifier.NotifyEnd(logPath, command, exitCode, duration); nerr != nil {
+	if nerr := s.notifier.NotifyEnd(logPath, strings.Join(s.args, " "), exitCode, duration); nerr != nil {
 		fmt.Fprintf(os.Stderr, "\033[33m[kuroko] notify error: %v\033[0m\n", nerr)
 	}
 
-	return exitCode, err
+	if s.cfg.Storage.Rotation.Enabled {
+		if rerr := logger.RotateLogs(s.cfg.LogDir, s.cfg.Storage.Rotation.MaxAgeDays, s.cfg.Storage.Rotation.MaxTotalSizeMB); rerr != nil {
+			fmt.Fprintf(os.Stderr, "\033[33m[kuroko] log rotation error: %v\033[0m\n", rerr)
+		}
+	}
 }
 
 func (s *Session) runWithPTY() (int, error) {
@@ -211,14 +219,7 @@ func (s *Session) terminateForSignal(sig os.Signal, oldState *term.State) int {
 	if hasSysSig {
 		code += int(sysSig)
 	}
-	if cerr := s.log.Close(code); cerr != nil {
-		fmt.Fprintf(os.Stderr, "\033[33m[kuroko] log close error: %v\033[0m\n", cerr)
-	}
-
-	command := strings.Join(s.args, " ")
-	if nerr := s.notifier.NotifyEnd(s.log.Path, command, code, time.Since(s.start)); nerr != nil {
-		fmt.Fprintf(os.Stderr, "\033[33m[kuroko] notify error: %v\033[0m\n", nerr)
-	}
+	s.finish(code)
 
 	return code
 }

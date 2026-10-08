@@ -204,3 +204,15 @@ func TestResolveReportsMalformedConfig(t *testing.T) {
 		t.Fatal("Resolve() expected error for malformed config.json, got nil")
 	}
 }
+
+func TestResolveReportsUnreadableConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path := filepath.Join(os.Getenv("HOME"), ".config", "kuroko", "config.json")
+	// A directory gives a deterministic read failure even when run as root.
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Resolve(Options{}); err == nil {
+		t.Fatal("Resolve silently ignored an unreadable config")
+	}
+}

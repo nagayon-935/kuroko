@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 	"unicode"
-	"unicode/utf8"
 
 	"golang.org/x/term"
 
@@ -232,12 +231,14 @@ func highlightQuery(line string, query string, isActive bool) string {
 	lineRunes := []rune(line)
 
 	byteOffsets := make([]int, len(lineRunes)+1)
-	offset := 0
-	for i, r := range lineRunes {
-		byteOffsets[i] = offset
-		offset += utf8.RuneLen(r)
+	runeIndex := 0
+	// Use offsets into the original bytes: invalid UTF-8 consumes one byte
+	// even though its decoded replacement rune would encode as three.
+	for byteIndex := range line {
+		byteOffsets[runeIndex] = byteIndex
+		runeIndex++
 	}
-	byteOffsets[len(lineRunes)] = offset
+	byteOffsets[len(lineRunes)] = len(line)
 
 	var result strings.Builder
 	lastByte := 0
@@ -295,7 +296,7 @@ func (v *Viewer) parseMetadata() {
 				timestamp = payload
 				// Extract command from the next line (prompt + command)
 				if i+1 < len(lines) {
-					_, cmdBytes := logger.SplitPrompt(lines[i+1])
+					_, cmdBytes, _ := logger.SplitPromptInfo(lines[i+1])
 					if len(cmdBytes) > 0 {
 						command = string(cmdBytes)
 					} else {

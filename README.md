@@ -312,7 +312,10 @@ kuroko/
 ├── cmd/kuroko/main.go          # エントリポイント
 ├── internal/
 │   ├── config/config.go        # 設定管理
-│   ├── logger/logger.go        # ログファイル生成
+│   ├── logger/
+│   │   ├── logger.go           # 端末出力の整形・ログ書き込み
+│   │   ├── storage.go          # ファイル名の確保・圧縮・ローテーション
+│   │   └── target.go           # 接続先名とログファイル名の生成
 │   ├── session/session.go      # PTY セッション制御
 │   ├── notifier/notifier.go    # 外部通知（Discord / Slack）
 │   ├── logstore/logstore.go    # ログファイルの列挙（viewer / completion で共有）

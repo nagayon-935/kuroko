@@ -2,14 +2,10 @@ package logger
 
 import (
 	"bytes"
-	"compress/gzip"
+	"errors"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -234,6 +230,7 @@ type pendingRow struct {
 // Logger writes session output to a file, applying ANSI stripping and a
 // terminal line-buffer simulation so the log is human-readable plain text.
 type Logger struct {
+	mu               sync.Mutex // guards writes, terminal state, and closure
 	file             *os.File
 	rawFile          *os.File // non-nil when KUROKO_RAW_DEBUG=1; receives raw PTY bytes
 	Path             string
@@ -253,18 +250,17 @@ type Logger struct {
 	networkMode      bool         // true when wrapping a NW device session (ssh/telnet/screen/…)
 	pendingRows      []pendingRow // committed rows not yet flushed to disk; see commitRow
 	cursorRow        int          // index into pendingRows the next '\n' commit lands on; == len(pendingRows) means "new row"
-	closeOnce        sync.Once
+	closed           bool
 	closeErr         error
 }
 
 func New(logDir string, args []string, redactionEnabled bool) (*Logger, error) {
 	filename := generateFilename(args)
-	path := uniquePath(logDir, filename)
-
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	f, err := createLogFile(logDir, filename)
 	if err != nil {
 		return nil, err
 	}
+	path := f.Name()
 
 	header := fmt.Sprintf(
 		"# kuroko session log\n# Started : %s\n# Command : %s\n# %s\n\n",
@@ -296,6 +292,12 @@ func New(logDir string, args []string, redactionEnabled bool) (*Logger, error) {
 }
 
 func (l *Logger) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return 0, os.ErrClosed
+	}
+
 	if l.rawFile != nil {
 		l.writeSeq++
 		fmt.Fprintf(l.rawFile, "=== write %d (%d bytes) ===\n%q\n", l.writeSeq, len(p), p)
@@ -704,13 +706,25 @@ func (l *Logger) processEscape(seq []byte) {
 // racing to shut down before the process dies) — only the first call does
 // the work; later calls return the same result.
 func (l *Logger) Close(exitCode int) error {
-	l.closeOnce.Do(func() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.closed {
+		l.closed = true
 		l.closeErr = l.doClose(exitCode)
-	})
+	}
 	return l.closeErr
 }
 
-func (l *Logger) doClose(exitCode int) error {
+func (l *Logger) doClose(exitCode int) (err error) {
+	// Release both files even when flushing the buffered output fails.
+	defer func() {
+		err = errors.Join(err, l.file.Close())
+		if l.rawFile != nil {
+			err = errors.Join(err, l.rawFile.Close())
+			l.rawFile = nil
+		}
+	}()
+
 	// Flush any rows still buffered for a possible cursor-up redraw — the
 	// session is ending, so no further redraw can occur.
 	if err := l.flushPendingRows(); err != nil {
@@ -743,8 +757,9 @@ func (l *Logger) doClose(exitCode int) error {
 		if l.redactionEnabled {
 			out = l.redact(out)
 		}
-		l.file.Write(out)
-		l.file.WriteString("\n")
+		if _, err := l.file.Write(append(out, '\n')); err != nil {
+			return err
+		}
 	}
 
 	footer := fmt.Sprintf(
@@ -753,282 +768,8 @@ func (l *Logger) doClose(exitCode int) error {
 		time.Now().Format(time.RFC3339),
 		exitCode,
 	)
-	l.file.WriteString(footer)
-	if l.rawFile != nil {
-		l.rawFile.Close()
-		l.rawFile = nil
-	}
-
-	return l.file.Close()
-}
-
-// uniquePath returns path unchanged if it does not exist, otherwise appends _1, _2, …
-func uniquePath(dir, filename string) string {
-	path := filepath.Join(dir, filename)
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return path
-	}
-	ext := filepath.Ext(filename)
-	name := strings.TrimSuffix(filename, ext)
-	for i := 1; ; i++ {
-		candidate := filepath.Join(dir, fmt.Sprintf("%s_%d%s", name, i, ext))
-		if _, err := os.Stat(candidate); os.IsNotExist(err) {
-			return candidate
-		}
-	}
-}
-
-// TargetName returns the human-readable target name for the given command
-// arguments (e.g. hostname for ssh, device for screen, command name otherwise).
-// Used by log filename generation.
-func TargetName(args []string) string {
-	_, hostname := TargetDetails(args)
-	return hostname
-}
-
-// TargetDetails returns two values:
-//   - address: full connection target as typed (e.g. "admin@router-a")
-//   - hostname: resolved canonical hostname (e.g. "router-a.dc1.example.jp")
-//
-// For non-SSH commands both values are identical.
-// The banner uses both values so operators see what they typed AND the resolved host.
-func TargetDetails(args []string) (address, hostname string) {
-	if len(args) == 0 {
-		return "", ""
-	}
-	cmd := args[0]
-	switch cmd {
-	case "ssh":
-		raw := extractSSHTarget(args[1:])   // user@host as typed
-		resolved := resolveSSHHostname(raw) // may resolve SSH config alias
-		// hostname is the bare host part of the resolved target
-		h := resolved
-		if idx := strings.LastIndex(h, "@"); idx >= 0 {
-			h = h[idx+1:]
-		}
-		return raw, h
-	case "screen":
-		t := extractScreenTarget(args[1:])
-		return t, t
-	default:
-		return cmd, cmd
-	}
-}
-
-func generateFilename(args []string) string {
-	ts := time.Now().Format("20060102_150405")
-	if len(args) == 0 {
-		return fmt.Sprintf("%s_unknown.log", ts)
-	}
-
-	cmd := args[0]
-	// Use the typed host (address without user@) as the filename component so
-	// SSH aliases like "edgeSW03" are preserved instead of being replaced by
-	// the resolved IP from ssh -G.
-	address, _ := TargetDetails(args)
-	host := address
-	if idx := strings.LastIndex(host, "@"); idx >= 0 {
-		host = host[idx+1:]
-	}
-
-	if host != "" && host != cmd {
-		return fmt.Sprintf("%s_%s_%s.log", ts, cmd, sanitize(host))
-	}
-	return fmt.Sprintf("%s_%s.log", ts, sanitize(cmd))
-}
-
-// resolveSSHHostname runs "ssh -G <host>" to resolve an alias defined in
-// ~/.ssh/config to its actual HostName. Returns the original target if
-// resolution fails or if the hostname is already the canonical name.
-func resolveSSHHostname(target string) string {
-	if target == "" {
-		return target
-	}
-
-	user, host := "", target
-	if idx := strings.LastIndex(target, "@"); idx >= 0 {
-		user = target[:idx+1]
-		host = target[idx+1:]
-	}
-
-	out, err := exec.Command("ssh", "-G", host).Output()
-	if err != nil {
-		return target
-	}
-
-	for _, line := range strings.Split(string(out), "\n") {
-		if strings.HasPrefix(strings.ToLower(line), "hostname ") {
-			resolved := strings.TrimSpace(line[len("hostname "):])
-			if resolved != "" && resolved != host {
-				return user + resolved
-			}
-			break
-		}
-	}
-	return target
-}
-
-// extractSSHTarget returns the first non-flag argument (user@host or host).
-func extractSSHTarget(args []string) string {
-	skipNext := false
-	// SSH options that consume the next argument
-	sshOptionArgs := map[string]bool{
-		"-b": true, "-c": true, "-D": true, "-E": true, "-e": true,
-		"-F": true, "-I": true, "-i": true, "-J": true, "-L": true,
-		"-l": true, "-m": true, "-o": true, "-p": true, "-Q": true,
-		"-R": true, "-S": true, "-w": true, "-W": true,
-	}
-	for _, arg := range args {
-		if skipNext {
-			skipNext = false
-			continue
-		}
-		if sshOptionArgs[arg] {
-			skipNext = true
-			continue
-		}
-		if !strings.HasPrefix(arg, "-") {
-			return arg
-		}
-	}
-	return ""
-}
-
-// extractScreenTarget returns the device basename (e.g. ttyUSB0 from /dev/ttyUSB0).
-func extractScreenTarget(args []string) string {
-	for _, arg := range args {
-		if !strings.HasPrefix(arg, "-") {
-			parts := strings.Split(arg, "/")
-			return parts[len(parts)-1]
-		}
-	}
-	return ""
-}
-
-func sanitize(s string) string {
-	r := strings.NewReplacer(
-		"/", "_", ":", "_", " ", "_", "\\", "_",
-		"*", "_", "?", "_", "\"", "_", "<", "_", ">", "_", "|", "_",
-	)
-	return r.Replace(s)
-}
-
-// CompressFile compresses the file at srcPath using gzip, deletes the original file,
-// and returns the path to the compressed file (.gz).
-func CompressFile(srcPath string) (string, error) {
-	dstPath := srcPath + ".gz"
-
-	srcFile, err := os.Open(srcPath)
-	if err != nil {
-		return "", err
-	}
-	defer srcFile.Close()
-
-	dstFile, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return "", err
-	}
-	defer dstFile.Close()
-
-	gzWriter := gzip.NewWriter(dstFile)
-	defer gzWriter.Close()
-
-	if _, err := io.Copy(gzWriter, srcFile); err != nil {
-		return "", err
-	}
-
-	// Close files explicitly before deleting the source
-	gzWriter.Close()
-	dstFile.Close()
-	srcFile.Close()
-
-	if err := os.Remove(srcPath); err != nil {
-		return "", err
-	}
-
-	return dstPath, nil
-}
-
-// RotateLogs scans the logDir and removes old logs based on age and total directory size.
-func RotateLogs(logDir string, maxAgeDays int, maxTotalSizeMB int) error {
-	entries, err := os.ReadDir(logDir)
-	if err != nil {
-		return err
-	}
-
-	type fileInfo struct {
-		path    string
-		size    int64
-		modTime time.Time
-	}
-
-	var files []fileInfo
-	now := time.Now()
-	maxAge := time.Duration(maxAgeDays) * 24 * time.Hour
-
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		// Only rotate .log or .log.gz files
-		if !strings.HasSuffix(name, ".log") && !strings.HasSuffix(name, ".log.gz") {
-			continue
-		}
-
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-
-		path := filepath.Join(logDir, name)
-		modTime := info.ModTime()
-
-		// 1. Remove files older than maxAgeDays
-		if maxAgeDays > 0 && now.Sub(modTime) > maxAge {
-			if rerr := os.Remove(path); rerr != nil && !os.IsNotExist(rerr) {
-				fmt.Fprintf(os.Stderr, "\033[33m[kuroko] rotation: failed to remove %s: %v\033[0m\n", path, rerr)
-			}
-			continue
-		}
-
-		files = append(files, fileInfo{
-			path:    path,
-			size:    info.Size(),
-			modTime: modTime,
-		})
-	}
-
-	if maxTotalSizeMB <= 0 {
-		return nil
-	}
-
-	// Calculate total size and check if it exceeds the limit
-	var totalSize int64
-	for _, f := range files {
-		totalSize += f.size
-	}
-
-	maxTotalSizeBytes := int64(maxTotalSizeMB) * 1024 * 1024
-	if totalSize <= maxTotalSizeBytes {
-		return nil
-	}
-
-	// 2. Sort by modTime (oldest first) and delete until total size is within the limit
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].modTime.Before(files[j].modTime)
-	})
-
-	for _, f := range files {
-		if totalSize <= maxTotalSizeBytes {
-			break
-		}
-		if err := os.Remove(f.path); err == nil {
-			totalSize -= f.size
-		}
-	}
-
-	return nil
+	_, err = l.file.WriteString(footer)
+	return err
 }
 
 var (
@@ -1096,5 +837,7 @@ func (l *Logger) redact(line []byte) []byte {
 
 // InAltScreen returns true if a full-screen application (like vim) is active.
 func (l *Logger) InAltScreen() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	return l.altScreen
 }

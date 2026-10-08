@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ryu/kuroko/internal/config"
 	"github.com/ryu/kuroko/internal/session"
@@ -26,9 +27,7 @@ func TestSessionNew(t *testing.T) {
 }
 
 func TestSessionNewBadLogDir(t *testing.T) {
-	// Use a non-existent sub-directory of an existing parent: os.Stat returns
-	// ENOENT so uniquePath returns immediately, then os.OpenFile fails because
-	// the parent directory does not exist.
+	// Creating the log fails immediately when the parent does not exist.
 	cfg := &config.Config{LogDir: filepath.Join(t.TempDir(), "no_such_dir")}
 	_, err := session.New(cfg, []string{"echo"})
 	if err == nil {
@@ -154,6 +153,14 @@ func TestSessionRunWithCompressionThreshold(t *testing.T) {
 
 func TestSessionRunWithRotation(t *testing.T) {
 	tmp := t.TempDir()
+	oldPath := filepath.Join(tmp, "old.log")
+	if err := os.WriteFile(oldPath, []byte("old session"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-31 * 24 * time.Hour)
+	if err := os.Chtimes(oldPath, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
 	cfg := &config.Config{
 		LogDir: tmp,
 		Storage: config.StorageConfig{
@@ -175,5 +182,7 @@ func TestSessionRunWithRotation(t *testing.T) {
 	if code != 0 {
 		t.Errorf("exit code = %d; want 0", code)
 	}
-	// Rotation runs in background; just verify Run completes normally.
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("rotation must complete before Run returns; old log stat = %v", err)
+	}
 }

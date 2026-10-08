@@ -77,7 +77,7 @@ func TestTerminateForSignalClosesLog(t *testing.T) {
 
 	// A second Close (mirroring the normal-exit path racing the signal
 	// handler) must be a no-op: it must not panic and must return the same
-	// result as the first call, proving the sync.Once guard works end to
+	// result as the first call, proving idempotent closure works end to
 	// end through terminateForSignal.
 	if err := s.log.Close(999); err != nil {
 		t.Errorf("second Close() returned error: %v; want nil (idempotent)", err)

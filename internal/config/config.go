@@ -104,10 +104,13 @@ func Resolve(opt Options) (*Config, error) {
 
 	// 1. config.json
 	configFile := filepath.Join(configDir, "config.json")
-	if data, err := os.ReadFile(configFile); err == nil {
+	data, err := os.ReadFile(configFile)
+	if err == nil {
 		if err := json.Unmarshal(data, cfg); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("parsing config %s: %w", configFile, err)
 		}
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("reading config %s: %w", configFile, err)
 	}
 
 	// 2. environment variables

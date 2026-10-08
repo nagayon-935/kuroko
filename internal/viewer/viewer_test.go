@@ -94,6 +94,34 @@ func TestNewViewer(t *testing.T) {
 	}
 }
 
+func TestParseMetadataNetworkPrompts(t *testing.T) {
+	for _, tt := range []struct{ line, command string }{
+		{"Router#show version", "show version"},
+		{"Router(config)#interface Gi0/1", "interface Gi0/1"},
+		{"user@junos> show route", "show route"},
+	} {
+		t.Run(tt.line, func(t *testing.T) {
+			v := &Viewer{logData: []byte("# kuroko:cmd:2026-06-18T12:00:01+09:00\n" + tt.line + "\n")}
+			v.parseMetadata()
+			if len(v.allCmds) != 1 {
+				t.Fatalf("commands = %v", v.allCmds)
+			}
+			if v.allCmds[0].Command != tt.command {
+				t.Errorf("command = %q; want %q", v.allCmds[0].Command, tt.command)
+			}
+		})
+	}
+}
+
+func TestHighlightQueryInvalidUTF8(t *testing.T) {
+	line := "\xffmatch\xfe"
+	got := highlightQuery(line, "match", false)
+	want := "\xff\x1b[30;43mmatch\x1b[0m\xfe"
+	if got != want {
+		t.Errorf("highlightQuery = %q; want %q", got, want)
+	}
+}
+
 func TestNewViewerFileNotFound(t *testing.T) {
 	_, err := newViewer("/nonexistent/path/file.log")
 	if err == nil {
