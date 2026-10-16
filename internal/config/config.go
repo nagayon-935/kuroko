@@ -78,7 +78,7 @@ func Resolve(opt Options) (*Config, error) {
 		return nil, err
 	}
 
-	configDir := filepath.Join(home, ".config", "kuroko")
+	configDir := filepath.Join(home, ".kuroko")
 
 	cfg := &Config{
 		LogDir: filepath.Join(configDir, "logs"),
@@ -105,6 +105,15 @@ func Resolve(opt Options) (*Config, error) {
 	// 1. config.json
 	configFile := filepath.Join(configDir, "config.json")
 	data, err := os.ReadFile(configFile)
+	if os.IsNotExist(err) {
+		// Keep old settings available until an explicit, verified migration.
+		legacyDir := filepath.Join(home, ".config", "kuroko")
+		configFile = filepath.Join(legacyDir, "config.json")
+		data, err = os.ReadFile(configFile)
+		if info, statErr := os.Stat(filepath.Join(legacyDir, "logs")); statErr == nil && info.IsDir() {
+			cfg.LogDir = filepath.Join(legacyDir, "logs")
+		}
+	}
 	if err == nil {
 		if err := json.Unmarshal(data, cfg); err != nil {
 			return nil, fmt.Errorf("parsing config %s: %w", configFile, err)

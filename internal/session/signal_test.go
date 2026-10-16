@@ -17,6 +17,7 @@ import (
 
 	"github.com/ryu/kuroko/internal/config"
 	"github.com/ryu/kuroko/internal/logger"
+	"github.com/ryu/kuroko/internal/logstore"
 	"github.com/ryu/kuroko/internal/notifier"
 )
 
@@ -273,7 +274,7 @@ func TestHandleTerminationSignalsReactsToSIGINT(t *testing.T) {
 		t.Fatal("helper process did not exit after SIGINT within 5s (SIGINT not handled)")
 	}
 
-	entries, err := os.ReadDir(logDir)
+	entries, err := logstore.ListLogFiles(logDir)
 	if err != nil || len(entries) == 0 {
 		t.Fatalf("expected a log file in %s; ReadDir err=%v entries=%v", logDir, err, entries)
 	}

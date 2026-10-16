@@ -13,7 +13,7 @@ import (
 
 // subcommands are the built-in kuroko subcommand words (in addition to
 // wrapping an arbitrary PATH command).
-var subcommands = []string{"logs", "view", "export", "help", "completion"}
+var subcommands = []string{"logs", "view", "export", "migrate", "help", "completion"}
 
 // globalFlags are accepted before the subcommand/wrapped-command word.
 // Go's flag package stops parsing at the first non-flag word, so they are
@@ -56,6 +56,16 @@ func Candidates(ctx []string, cfg *config.Config) []string {
 		return append(logFileNames(logDir), "--last")
 	case "export":
 		return exportCandidates(p.args, logDir)
+	case "logs":
+		if len(p.args) == 0 {
+			return []string{"--info"}
+		}
+		return nil
+	case "migrate":
+		if len(p.args) == 0 {
+			return []string{"--from"}
+		}
+		return nil
 	case "completion":
 		if len(p.args) > 0 {
 			return nil

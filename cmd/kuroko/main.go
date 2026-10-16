@@ -30,13 +30,15 @@ Examples:
   kuroko --log-dir ~/work/logs screen /dev/ttyUSB0 115200
   kuroko bash
   kuroko logs           List saved logs
+  kuroko logs --info    Show storage root, counts and disk usage
+  kuroko migrate        Verify and migrate legacy logs and config to ~/.kuroko
   kuroko view <logfile>  View a saved log session interactively
   kuroko view --last     View the most recent session
   kuroko export --last --command 1 -o command.txt  Export a command and output
   kuroko export <logfile>  Export an entire session to stdout
   kuroko completion bash  Print a bash completion script
 
-Logs are saved to ~/.config/kuroko/logs/ by default.
+Logs are saved to ~/.kuroko/logs/ by default.
 
 Shell completion (bash):
   source <(kuroko completion bash)                                    # current shell only
@@ -89,12 +91,13 @@ func main() {
 		fmt.Print(usage)
 		os.Exit(0)
 	case "logs":
-		cfg, err := config.Load(config.Options{LogDir: logDir})
-		if err != nil {
-			fatalf("config error: %v", err)
+		if err := runLogs(rest[1:], logDir, os.Stdout, os.Stderr); err != nil {
+			fatalf("logs error: %v", err)
 		}
-		if err := viewer.RunSelector(cfg); err != nil {
-			fatalf("selector error: %v", err)
+		os.Exit(0)
+	case "migrate":
+		if err := runMigration(rest[1:], os.Stdout, os.Stderr); err != nil {
+			fatalf("migration error: %v", err)
 		}
 		os.Exit(0)
 	case "view":

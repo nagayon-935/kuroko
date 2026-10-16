@@ -49,8 +49,8 @@ func TestFinishNotifiesBeforeRotation(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = s.log.Close(0) })
-	// A sparse log larger than the size cap will be removed by rotation.
-	if err := os.Truncate(s.log.Path, 2*1024*1024); err != nil {
+	// A completed log larger than the cap will be removed by rotation.
+	if _, err := s.log.Write([]byte(strings.Repeat(strings.Repeat("x", 4096)+"\n", 300))); err != nil {
 		t.Fatal(err)
 	}
 	n := &fileCheckingNotifier{}
