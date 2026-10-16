@@ -33,7 +33,7 @@ func TestCandidates(t *testing.T) {
 		{
 			name: "empty context lists subcommands and global flags",
 			ctx:  nil,
-			want: []string{"logs", "view", "export", "help", "completion",
+			want: []string{"logs", "view", "export", "migrate", "help", "completion",
 				"--log-dir", "-d", "--help", "-h", "--version", "-v"},
 		},
 		{
@@ -42,9 +42,9 @@ func TestCandidates(t *testing.T) {
 			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log", "--last"},
 		},
 		{
-			name: "logs subcommand offers nothing (flags after it are ignored)",
+			name: "logs offers storage info",
 			ctx:  []string{"logs"},
-			want: nil,
+			want: []string{"--info"},
 		},
 		{
 			name: "help subcommand offers nothing",
@@ -194,6 +194,31 @@ func TestExportCandidates(t *testing.T) {
 	} {
 		got := Candidates(tt.ctx, cfg)
 		if !reflect.DeepEqual(got, tt.want) {
+			t.Fatalf("Candidates(%v)=%v; want %v", tt.ctx, got, tt.want)
+		}
+	}
+}
+
+func TestNestedStorageCompletion(t *testing.T) {
+	root := t.TempDir()
+	relative := filepath.Join("ssh", "router", "session.log")
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(root, relative)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, relative), []byte("log"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{LogDir: root}
+	for _, tt := range []struct {
+		ctx  []string
+		want []string
+	}{
+		{[]string{"view"}, []string{relative, "--last"}},
+		{[]string{"logs"}, []string{"--info"}},
+		{[]string{"logs", "--info"}, nil},
+		{[]string{"migrate"}, []string{"--from"}},
+	} {
+		if got := Candidates(tt.ctx, cfg); !reflect.DeepEqual(got, tt.want) {
 			t.Fatalf("Candidates(%v)=%v; want %v", tt.ctx, got, tt.want)
 		}
 	}

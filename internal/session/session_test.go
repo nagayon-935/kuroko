@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ryu/kuroko/internal/config"
+	"github.com/ryu/kuroko/internal/logstore"
 	"github.com/ryu/kuroko/internal/session"
 )
 
@@ -76,7 +77,7 @@ func TestSessionRunCreatesLogFile(t *testing.T) {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	entries, err := os.ReadDir(tmp)
+	entries, err := logstore.ListLogFiles(tmp)
 	if err != nil {
 		t.Fatalf("ReadDir: %v", err)
 	}
@@ -106,7 +107,7 @@ func TestSessionRunWithCompression(t *testing.T) {
 		t.Errorf("exit code = %d; want 0", code)
 	}
 
-	entries, err := os.ReadDir(tmp)
+	entries, err := logstore.ListLogFiles(tmp)
 	if err != nil {
 		t.Fatalf("ReadDir: %v", err)
 	}
@@ -140,7 +141,7 @@ func TestSessionRunWithCompressionThreshold(t *testing.T) {
 		t.Fatalf("Run(): %v", err)
 	}
 
-	entries, err := os.ReadDir(tmp)
+	entries, err := logstore.ListLogFiles(tmp)
 	if err != nil {
 		t.Fatalf("ReadDir: %v", err)
 	}

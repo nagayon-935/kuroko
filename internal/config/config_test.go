@@ -19,7 +19,7 @@ func TestLoadDefaults(t *testing.T) {
 		t.Fatalf("Load() error: %v", err)
 	}
 
-	wantLogDir := filepath.Join(tmp, ".config", "kuroko", "logs")
+	wantLogDir := filepath.Join(tmp, ".kuroko", "logs")
 	if cfg.LogDir != wantLogDir {
 		t.Errorf("LogDir = %q, want %q", cfg.LogDir, wantLogDir)
 	}
@@ -214,5 +214,43 @@ func TestResolveReportsUnreadableConfig(t *testing.T) {
 	}
 	if _, err := Resolve(Options{}); err == nil {
 		t.Fatal("Resolve silently ignored an unreadable config")
+	}
+}
+
+func TestResolvePrefersNewConfigAndKeepsLegacyReadOnly(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("KUROKO_LOG_DIR", "")
+	t.Setenv("KUROKO_NOTIFIER", "")
+	oldDir := filepath.Join(home, ".config", "kuroko")
+	if err := os.MkdirAll(oldDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldConfig := filepath.Join(oldDir, "config.json")
+	oldData := []byte(`{"notifier":{"type":"slack"}}`)
+	if err := os.WriteFile(oldConfig, oldData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Resolve(Options{})
+	if err != nil || cfg.Notifier.Type != "slack" {
+		t.Fatalf("legacy fallback failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".kuroko")); !os.IsNotExist(err) {
+		t.Fatal("Resolve performed migration")
+	}
+	newDir := filepath.Join(home, ".kuroko")
+	if err := os.MkdirAll(newDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(newDir, "config.json"), []byte(`{"notifier":{"type":"discord"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Resolve(Options{})
+	if err != nil || cfg.Notifier.Type != "discord" || cfg.LogDir != filepath.Join(newDir, "logs") {
+		t.Fatalf("new config not preferred: %v", err)
+	}
+	data, err := os.ReadFile(oldConfig)
+	if err != nil || string(data) != string(oldData) {
+		t.Fatal("legacy config changed during resolve")
 	}
 }

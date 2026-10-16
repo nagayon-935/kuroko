@@ -98,9 +98,55 @@ kuroko -d ~/work/logs ssh user@hostname
 
 ### 保存場所
 
+```text
+~/.kuroko/
+├── config.json
+└── logs/
+    ├── ssh/
+    │   ├── edgeSW03/
+    │   └── core-prod-01/
+    ├── screen/
+    │   └── ttyUSB0/
+    └── bash/
 ```
-~/.config/kuroko/logs/
+
+SSH は入力したホスト名・エイリアス（ユーザー名を除く）、screen はデバイス名、その他はコマンド名ごとに保存します。
+`kuroko ssh admin@edgeSW03` は `~/.kuroko/logs/ssh/edgeSW03/` に保存します。
+保存先に使えない文字は衝突しない形式に変換します。
+`--log-dir`・環境変数・設定で指定するディレクトリは、この階層のルートになります。
+ディレクトリは `0700`、ログは `0600` で新規作成します。
+
+### 保存先と使用容量の確認
+
+```bash
+kuroko logs --info
+kuroko -d ~/work/customer-a/logs logs --info
 ```
+
+保存先の絶対パス、ログ件数、ディスク使用量、接続先別の件数・使用量を表示します。
+対話端末は不要で、保存先が存在しなくても作成せずに0件と表示します。
+gzip は圧縮された実サイズで集計し、デバッグ用の `.raw` や書き出した `.txt` は含めません。
+
+### 旧保存先・設定からの移行
+
+```bash
+kuroko migrate
+```
+
+旧 `~/.config/kuroko/config.json` と、そこに指定された保存先（未指定なら `~/.config/kuroko/logs/`）を新しい配置に移行します。
+旧標準保存先にもログが残っている場合は、そちらも移行します。
+ログ内の接続先情報を使ってフォルダ分けし、分類できないログは `unclassified/` に保存します。
+設定の `log_dir` は `~/.kuroko/logs` に更新し、通知・マスキング・保管設定や未知の設定項目は保持します。
+
+コピー先を同期してSHA-256で全件検証し、削除直前にも元ファイルと移行先を照合します。
+検証できた元ファイルだけを削除し、空になった旧ディレクトリを削除します。
+同名で内容が異なるログは別名で保存し、既存ファイルは上書きしません。
+設定の衝突、壊れた圧縮ログ、使用中のファイルを検出した場合は元データを残して停止します。
+中断後の再実行では、内容が一致するコピー済みファイルを再利用します。
+
+移行は明示的なコマンドで行います。通常の閲覧・情報表示・補完で移行や削除は実行しません。
+旧バージョンを含む記録中のセッションを終了してから実行してください。
+ログ以外のファイルが旧フォルダに残っている場合、そのファイルとフォルダは保持します。
 
 ### ファイル名の形式
 
@@ -116,7 +162,7 @@ SSH の場合は入力したホスト名（エイリアス）がそのまま使�
 
 ### ログ一覧の確認 (TUI セレクター)
 
-保存されているログファイルの一覧を対話型の TUI で確認・選択できます。
+保存先の全サブフォルダにあるログを横断し、対話型の TUI で確認・選択できます。
 
 ```bash
 kuroko logs
@@ -149,7 +195,9 @@ kuroko -d ~/work/logs view --last
 タイムラインの先頭にある **`Entire session`（セッション全体）** を初期表示します。
 接続時のバナーやエラーも含めて確認でき、コマンドを検出できないログも全文表示します。
 各コマンドには書き出しに使える番号を表示します。通常のログと gzip 圧縮ログの両方に対応しています。
-`--last` は記録されたセッション開始日時を基準に選び、開始情報のないログでは更新日時を使います。
+`--last` は全サブフォルダから記録されたセッション開始日時を基準に選び、開始情報のないログでは更新日時を使います。
+保存先ルートからの相対パス（例：`kuroko view ssh/edgeSW03/session.log`）でも開けます。
+ファイル名だけの指定が複数のログに一致する場合は、候補の相対パスを案内します。
 
 #### キーおよびマウス操作
 
@@ -210,8 +258,8 @@ kuroko completion bash > "$(brew --prefix)/etc/bash_completion.d/kuroko"
 ```
 
 ```bash
-kuroko <TAB>          # logs / view / export / help / completion と PATH 上のコマンドを補完
-kuroko view <TAB>     # ~/.config/kuroko/logs (または -d で指定したディレクトリ) のログファイル名を補完
+kuroko <TAB>          # logs / view / export / migrate / help / completion と PATH 上のコマンドを補完
+kuroko view <TAB>     # ~/.kuroko/logs (または -d で指定したディレクトリ) のログファイル名を補完
 kuroko -<TAB>         # --log-dir / -d / --help / -h / --version / -v を補完
 ```
 
@@ -255,7 +303,7 @@ SSH / screen 接続開始時に接続先を強調表示するバナーを標準�
 ╚══════════════════════════════════════╝
 ```
 
-設定例（`~/.config/kuroko/config.json`）:
+設定例（`~/.kuroko/config.json`）:
 
 ```json
 {
@@ -285,7 +333,7 @@ user@junos> show route       → 記録
 
 ## 設定ファイル
 
-`~/.config/kuroko/config.json` を作成すると、起動のたびに設定が読み込まれます。
+`~/.kuroko/config.json` を作成すると、起動のたびに設定が読み込まれます。
 
 ```json
 {
@@ -365,6 +413,7 @@ kuroko/
 │   ├── session/session.go      # PTY セッション制御
 │   ├── notifier/notifier.go    # 外部通知（Discord / Slack）
 │   ├── logstore/               # ログ列挙・圧縮ログの読み込み・セッション情報・直近ログの解決
+│   ├── migration/              # 検証付きの旧ログ・設定の移行と元ファイル削除
 │   ├── completion/completion.go # シェル補完の候補計算・スクリプト生成
 │   └── viewer/viewer.go        # TUI ログビューア
 ├── go.mod

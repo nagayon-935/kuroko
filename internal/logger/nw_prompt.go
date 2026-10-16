@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -124,7 +125,7 @@ func isNetworkSessionCommand(args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
-	switch args[0] {
+	switch filepath.Base(args[0]) {
 	case "ssh", "telnet", "screen", "cu", "minicom", "picocom":
 		return true
 	}

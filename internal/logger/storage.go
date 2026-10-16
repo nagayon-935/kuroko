@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/ryu/kuroko/internal/logstore"
@@ -28,6 +29,13 @@ func createLogFile(dir, filename string) (*os.File, error) {
 		f, err := os.OpenFile(filepath.Join(dir, candidate), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if errors.Is(err, os.ErrExist) {
 			continue
+		}
+		if err == nil {
+			// Held until Logger.Close; migration and rotation skip open sessions.
+			if lockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); lockErr != nil {
+				f.Close()
+				return nil, lockErr
+			}
 		}
 		return f, err
 	}
@@ -117,6 +125,9 @@ func RotateLogs(logDir string, maxAgeDays int, maxTotalSizeMB int) error {
 
 		path := filepath.Join(logDir, name)
 		modTime := info.ModTime()
+		if activeLog(path) {
+			continue
+		}
 
 		// 1. Remove files older than maxAgeDays
 		if maxAgeDays > 0 && now.Sub(modTime) > maxAge {
@@ -167,4 +178,19 @@ func RotateLogs(logDir string, maxAgeDays int, maxTotalSizeMB int) error {
 	}
 
 	return rotationErr
+}
+
+// Logs from older kuroko versions have no advisory lock, so also leave
+// recognized sessions without a completion footer outside retention cleanup.
+func activeLog(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return true
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return true
+	}
+	s, err := logstore.ReadSummary(path)
+	return err != nil || (s.Command != "" && s.ExitCode == nil)
 }

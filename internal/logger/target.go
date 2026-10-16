@@ -3,6 +3,7 @@ package logger
 import (
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -26,7 +27,7 @@ func TargetDetails(args []string) (address, hostname string) {
 		return "", ""
 	}
 	raw := TargetAddress(args)
-	switch args[0] {
+	switch filepath.Base(args[0]) {
 	case "ssh":
 		resolved := resolveSSHHostname(raw) // may resolve SSH config alias
 		// hostname is the bare host part of the resolved target
@@ -46,7 +47,7 @@ func TargetAddress(args []string) string {
 	if len(args) == 0 {
 		return ""
 	}
-	switch args[0] {
+	switch filepath.Base(args[0]) {
 	case "ssh":
 		return extractSSHTarget(args[1:])
 	case "screen":
@@ -62,7 +63,7 @@ func generateFilename(args []string) string {
 		return fmt.Sprintf("%s_unknown.log", ts)
 	}
 
-	cmd := args[0]
+	cmd := filepath.Base(args[0])
 	// Use the typed host (address without user@) as the filename component so
 	// SSH aliases like "edgeSW03" are preserved instead of being replaced by
 	// the resolved IP from ssh -G.

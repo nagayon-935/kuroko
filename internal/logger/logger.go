@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/ryu/kuroko/internal/logstore"
 	"github.com/ryu/kuroko/internal/textwidth"
 )
 
@@ -256,8 +257,18 @@ type Logger struct {
 }
 
 func New(logDir string, args []string, redactionEnabled bool) (*Logger, error) {
+	if info, err := os.Stat(logDir); err != nil || !info.IsDir() {
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("not a log directory: %s", logDir)
+	}
+	dir, err := logstore.EnsureSubdir(logDir, LogSubdir(args))
+	if err != nil {
+		return nil, err
+	}
 	filename := generateFilename(args)
-	f, err := createLogFile(logDir, filename)
+	f, err := createLogFile(dir, filename)
 	if err != nil {
 		return nil, err
 	}

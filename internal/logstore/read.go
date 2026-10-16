@@ -176,7 +176,7 @@ func (w *tailWindow) Write(p []byte) (int, error) {
 // without a kuroko header. Only the header is read, even for large gzip logs.
 func LatestLogFile(dir string) (string, error) {
 	entries, err := ListLogFiles(dir)
-	if os.IsNotExist(err) {
+	if errors.Is(err, os.ErrNotExist) {
 		return "", fmt.Errorf("no saved logs in %s", dir)
 	}
 	if err != nil {
