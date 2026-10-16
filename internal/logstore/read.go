@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -186,7 +185,7 @@ func LatestLogFile(dir string) (string, error) {
 	var latestTime time.Time
 	var latestModified time.Time
 	for _, entry := range entries {
-		path := filepath.Join(dir, entry.Name())
+		path := entry.Path
 		info, err := entry.Info()
 		if err != nil {
 			continue

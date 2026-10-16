@@ -72,12 +72,12 @@ func (s *LogSelector) scanLogs() error {
 			continue
 		}
 
-		summary, readErr := logstore.ReadSummary(filepath.Join(s.logDir, entry.Name()))
+		summary, readErr := logstore.ReadSummary(entry.Path)
 		if summary.Target == "" && summary.Command != "" {
 			summary.Target = logger.TargetAddress(strings.Fields(summary.Command))
 		}
 		items = append(items, selectorItem{
-			name:      entry.Name(),
+			name:      entry.RelativePath,
 			modTime:   info.ModTime(),
 			size:      info.Size(),
 			summary:   summary,

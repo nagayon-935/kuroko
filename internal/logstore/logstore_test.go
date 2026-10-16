@@ -67,7 +67,7 @@ func TestListLogFiles(t *testing.T) {
 
 			var got []string
 			for _, e := range entries {
-				got = append(got, e.Name())
+				got = append(got, e.RelativePath)
 			}
 			if len(got) != len(tt.want) {
 				t.Fatalf("got %v, want %v", got, tt.want)

@@ -148,7 +148,7 @@ func logFileNames(logDir string) []string {
 	}
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
-		names = append(names, e.Name())
+		names = append(names, e.RelativePath)
 	}
 	return names
 }
