@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -236,6 +237,7 @@ type Logger struct {
 	rawFile          *os.File // non-nil when KUROKO_RAW_DEBUG=1; receives raw PTY bytes
 	Path             string
 	altScreen        bool         // true while a full-screen app (vim/less) owns the terminal
+	logAltScreen     bool         // screen wraps the whole connection in alternate-screen mode
 	seqBuf           []byte       // incomplete escape sequence carried across Write calls
 	runeBuf          []byte       // incomplete UTF-8 rune carried across Write calls
 	lineBuf          []rune       // current output line, one terminal column per slot (wide runes occupy two slots; see wideContinuation)
@@ -291,6 +293,7 @@ func New(logDir string, args []string, redactionEnabled bool) (*Logger, error) {
 		Path:             path,
 		redactionEnabled: redactionEnabled,
 		networkMode:      isNetworkSessionCommand(args),
+		logAltScreen:     len(args) > 0 && filepath.Base(args[0]) == "screen",
 	}
 
 	if os.Getenv("KUROKO_RAW_DEBUG") == "1" {
@@ -339,7 +342,8 @@ func (l *Logger) Write(p []byte) (int, error) {
 // writeFiltered handles alternate-screen suppression.
 // Full-screen apps (vim, less, htop) bracket their output with \x1b[?1049h
 // (enter) and \x1b[?1049l (exit).  While in alternate-screen mode the raw
-// PTY stream produces garbled content; we suppress it and log a marker.
+// PTY stream produces garbled content, so we suppress it. When wrapping
+// screen itself, this mode contains the connection's output and must be logged.
 func (l *Logger) writeFiltered(data []byte) error {
 	for len(data) > 0 {
 		if !l.altScreen {
@@ -350,13 +354,21 @@ func (l *Logger) writeFiltered(data []byte) error {
 			if err := l.processLine(normalizeLineEndings(data[:idx])); err != nil {
 				return err
 			}
-			// Suppress alternate screen output entirely without inserting the warning text.
+			// Consume the transition; screen sessions keep the output inside it.
 			l.altScreen = true
 			data = data[idx+len(enterAltScreen):]
 		} else {
 			idx := bytes.Index(data, exitAltScreen)
 			if idx < 0 {
+				if l.logAltScreen {
+					return l.processLine(normalizeLineEndings(data))
+				}
 				return nil // still inside alternate screen; discard
+			}
+			if l.logAltScreen {
+				if err := l.processLine(normalizeLineEndings(data[:idx])); err != nil {
+					return err
+				}
 			}
 			l.altScreen = false
 			data = data[idx+len(exitAltScreen):]
