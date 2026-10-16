@@ -75,22 +75,25 @@ func TestNewViewer(t *testing.T) {
 		t.Fatalf("newViewer() error: %v", err)
 	}
 
-	if len(v.allCmds) != 2 {
-		t.Fatalf("expected 2 commands, got %d", len(v.allCmds))
+	if len(v.allCmds) != 3 {
+		t.Fatalf("expected session plus 2 commands, got %d", len(v.allCmds))
 	}
-	if v.allCmds[0].Command != "ls" {
-		t.Errorf("allCmds[0].Command = %q; want %q", v.allCmds[0].Command, "ls")
+	if v.allCmds[1].Command != "ls" {
+		t.Errorf("allCmds[0].Command = %q; want %q", v.allCmds[1].Command, "ls")
 	}
-	if v.allCmds[1].Command != "cat file.txt" {
-		t.Errorf("allCmds[1].Command = %q; want %q", v.allCmds[1].Command, "cat file.txt")
+	if v.allCmds[2].Command != "cat file.txt" {
+		t.Errorf("allCmds[1].Command = %q; want %q", v.allCmds[2].Command, "cat file.txt")
 	}
 	// Timestamps should be parsed from the metadata lines
-	if v.allCmds[0].Timestamp == "" {
+	if v.allCmds[1].Timestamp == "" {
 		t.Error("allCmds[0].Timestamp should not be empty")
 	}
+	if !v.allCmds[0].WholeSession {
+		t.Fatal("missing entire-session entry")
+	}
 	// Initial filter with empty query returns all commands
-	if len(v.filteredIdx) != 2 {
-		t.Errorf("expected 2 filtered entries initially, got %d", len(v.filteredIdx))
+	if len(v.filteredIdx) != 3 {
+		t.Errorf("expected session plus 2 filtered entries initially, got %d", len(v.filteredIdx))
 	}
 }
 
@@ -148,8 +151,8 @@ func TestNewViewerGzip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newViewer() for gzip: %v", err)
 	}
-	if len(v.allCmds) != 2 {
-		t.Errorf("expected 2 commands in gzip log, got %d", len(v.allCmds))
+	if len(v.allCmds) != 3 {
+		t.Errorf("expected session plus 2 commands in gzip log, got %d", len(v.allCmds))
 	}
 }
 
@@ -211,11 +214,11 @@ func TestParseMetadataOldFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newViewer(): %v", err)
 	}
-	if len(v.allCmds) != 1 {
-		t.Fatalf("expected 1 command, got %d", len(v.allCmds))
+	if len(v.allCmds) != 2 {
+		t.Fatalf("expected session plus 1 command, got %d", len(v.allCmds))
 	}
-	if v.allCmds[0].Command != "ls" {
-		t.Errorf("command = %q; want %q", v.allCmds[0].Command, "ls")
+	if v.allCmds[1].Command != "ls" {
+		t.Errorf("command = %q; want %q", v.allCmds[1].Command, "ls")
 	}
 }
 
@@ -232,11 +235,11 @@ func TestParseMetadataNoPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newViewer(): %v", err)
 	}
-	if len(v.allCmds) != 1 {
-		t.Fatalf("expected 1 command, got %d", len(v.allCmds))
+	if len(v.allCmds) != 2 {
+		t.Fatalf("expected session plus 1 command, got %d", len(v.allCmds))
 	}
-	if v.allCmds[0].Command != "no-prompt-command" {
-		t.Errorf("command = %q; want %q", v.allCmds[0].Command, "no-prompt-command")
+	if v.allCmds[1].Command != "no-prompt-command" {
+		t.Errorf("command = %q; want %q", v.allCmds[1].Command, "no-prompt-command")
 	}
 }
 
@@ -330,7 +333,7 @@ func TestViewerDrawScrollsToKeepSelectionVisible(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newViewer(): %v", err)
 	}
-	if len(v.allCmds) != numCmds {
+	if len(v.allCmds) != numCmds+1 {
 		t.Fatalf("expected %d commands, got %d", numCmds, len(v.allCmds))
 	}
 

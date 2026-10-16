@@ -13,14 +13,17 @@ import (
 	"golang.org/x/term"
 
 	"github.com/ryu/kuroko/internal/config"
+	"github.com/ryu/kuroko/internal/logger"
 	"github.com/ryu/kuroko/internal/logstore"
 	"github.com/ryu/kuroko/internal/textwidth"
 )
 
 type selectorItem struct {
-	name    string
-	modTime time.Time
-	size    int64
+	name      string
+	modTime   time.Time
+	size      int64
+	summary   logstore.Summary
+	readError bool
 }
 
 type LogSelector struct {
@@ -69,10 +72,16 @@ func (s *LogSelector) scanLogs() error {
 			continue
 		}
 
+		summary, readErr := logstore.ReadSummary(filepath.Join(s.logDir, entry.Name()))
+		if summary.Target == "" && summary.Command != "" {
+			summary.Target = logger.TargetAddress(strings.Fields(summary.Command))
+		}
 		items = append(items, selectorItem{
-			name:    entry.Name(),
-			modTime: info.ModTime(),
-			size:    info.Size(),
+			name:      entry.Name(),
+			modTime:   info.ModTime(),
+			size:      info.Size(),
+			summary:   summary,
+			readError: readErr != nil,
 		})
 	}
 
@@ -83,10 +92,20 @@ func (s *LogSelector) scanLogs() error {
 
 func (s *LogSelector) applySortOrder(items []selectorItem) {
 	sort.Slice(items, func(i, j int) bool {
-		if s.sortDesc {
-			return items[i].modTime.After(items[j].modTime)
+		ti, tj := items[i].started(), items[j].started()
+		if ti.Equal(tj) {
+			ti, tj = items[i].modTime, items[j].modTime
 		}
-		return items[i].modTime.Before(items[j].modTime)
+		if ti.Equal(tj) {
+			if s.sortDesc {
+				return items[i].name > items[j].name
+			}
+			return items[i].name < items[j].name
+		}
+		if s.sortDesc {
+			return ti.After(tj)
+		}
+		return ti.Before(tj)
 	})
 }
 
@@ -101,7 +120,8 @@ func (s *LogSelector) updateFilter() {
 	s.filtered = nil
 	query := strings.ToLower(s.searchQuery)
 	for _, item := range s.items {
-		if query == "" || strings.Contains(strings.ToLower(item.name), query) {
+		searchText := item.name + " " + item.summary.Target + " " + item.summary.Command + " " + item.status()
+		if query == "" || strings.Contains(strings.ToLower(searchText), query) {
 			s.filtered = append(s.filtered, item)
 		}
 	}
@@ -302,12 +322,22 @@ func (s *LogSelector) draw() {
 				indicator = "> "
 			}
 
-			// Format item line: modTime, size, name
-			ts := item.modTime.Format("2006-01-02 15:04:05")
+			ts := item.started().Format("2006-01-02 15:04:05")
 			sizeStr := formatSize(item.size)
 
 			// Try to align nicely
-			line = fmt.Sprintf("%s[%s] (%-8s) %s", indicator, ts, sizeStr, item.name)
+			if item.summary.Command != "" {
+				duration := "--"
+				if !item.summary.Started.IsZero() && !item.summary.Ended.IsZero() {
+					duration = item.summary.Duration().Round(time.Second).String()
+				}
+				line = fmt.Sprintf("%s[%s] %-8s %-7s %s  (%s) %s", indicator, ts, item.status(), duration, item.summary.Target, sizeStr, item.name)
+			} else {
+				line = fmt.Sprintf("%s[%s] (%-8s) %s", indicator, ts, sizeStr, item.name)
+				if item.readError {
+					line = fmt.Sprintf("%s[%s] unreadable (%s) %s", indicator, ts, sizeStr, item.name)
+				}
+			}
 			if n := textwidth.String(line); n > s.width {
 				line = truncateDisplay(line, s.width)
 			} else {
@@ -317,6 +347,13 @@ func (s *LogSelector) draw() {
 			if listRow == s.selected {
 				line = fmt.Sprintf("\x1b[30;47m%s\x1b[0m", line)
 			}
+		} else if r == 0 && len(s.filtered) == 0 {
+			line = "No saved logs. Record a session with: kuroko <command>"
+			if len(s.items) > 0 {
+				line = "No matching logs. Press / then Enter to clear the filter."
+			}
+			line = truncateDisplay(line, s.width)
+			line += strings.Repeat(" ", s.width-textwidth.String(line))
 		} else {
 			line = strings.Repeat(" ", s.width)
 		}
@@ -342,6 +379,29 @@ func (s *LogSelector) draw() {
 	out.WriteString(fmt.Sprintf("\x1b[30;47m%s\x1b[0m\x1b[K", footerText))
 
 	os.Stdout.Write(out.Bytes())
+}
+
+func (item selectorItem) started() time.Time {
+	if !item.summary.Started.IsZero() {
+		return item.summary.Started
+	}
+	return item.modTime
+}
+
+func (item selectorItem) status() string {
+	if item.readError {
+		return "unreadable"
+	}
+	if item.summary.ExitCode == nil {
+		if !item.summary.Started.IsZero() {
+			return "open"
+		}
+		return "unknown"
+	}
+	if *item.summary.ExitCode == 0 {
+		return "OK"
+	}
+	return fmt.Sprintf("exit %d", *item.summary.ExitCode)
 }
 
 func formatSize(size int64) string {

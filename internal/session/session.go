@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -27,6 +28,7 @@ type Session struct {
 	cmd        *exec.Cmd // set once the child process starts; read by terminateForSignal to propagate termination signals
 	start      time.Time // set at the beginning of Run(); read by terminateForSignal to compute NotifyEnd's duration
 	finishOnce sync.Once // normal exit and signal cleanup share one finalization
+	logFailed  atomic.Bool
 }
 
 func New(cfg *config.Config, args []string) (*Session, error) {
@@ -106,6 +108,13 @@ func (s *Session) finishLog(exitCode int) {
 			fmt.Fprintf(os.Stderr, "\033[33m[kuroko] log rotation error: %v\033[0m\n", rerr)
 		}
 	}
+	writeCompletion(os.Stderr, logPath, exitCode, duration, closeErr, s.logFailed.Load())
+}
+
+func (s *Session) logWriter() *failOpenWriter {
+	w := newFailOpenWriter(s.log)
+	w.onFailure = func() { s.logFailed.Store(true) }
+	return w
 }
 
 func (s *Session) runWithPTY() (int, error) {
@@ -146,7 +155,7 @@ func (s *Session) runWithPTY() (int, error) {
 	// MultiWriter aborts entirely on the first error/short write from any
 	// writer, which would stop draining the PTY and hang the child process
 	// (and this terminal) the next time it writes.
-	io.Copy(io.MultiWriter(os.Stdout, newFailOpenWriter(s.log)), ptmx)
+	io.Copy(io.MultiWriter(os.Stdout, s.logWriter()), ptmx)
 
 	return waitResult(cmd.Wait())
 }
@@ -232,8 +241,8 @@ func (s *Session) runPlain() (int, error) {
 	// copies Stdout and Stderr concurrently in separate goroutines, and a
 	// hard failure on one stream must not affect the other's independent
 	// fail-open state.
-	cmd.Stdout = io.MultiWriter(os.Stdout, newFailOpenWriter(s.log))
-	cmd.Stderr = io.MultiWriter(os.Stderr, newFailOpenWriter(s.log))
+	cmd.Stdout = io.MultiWriter(os.Stdout, s.logWriter())
+	cmd.Stderr = io.MultiWriter(os.Stderr, s.logWriter())
 
 	return waitResult(cmd.Run())
 }

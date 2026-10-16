@@ -13,7 +13,7 @@ import (
 
 // subcommands are the built-in kuroko subcommand words (in addition to
 // wrapping an arbitrary PATH command).
-var subcommands = []string{"logs", "view", "help", "completion"}
+var subcommands = []string{"logs", "view", "export", "help", "completion"}
 
 // globalFlags are accepted before the subcommand/wrapped-command word.
 // Go's flag package stops parsing at the first non-flag word, so they are
@@ -50,11 +50,12 @@ func Candidates(ctx []string, cfg *config.Config) []string {
 	case "":
 		return append(append([]string{}, subcommands...), globalFlags...)
 	case "view":
-		// view takes exactly one log file; main ignores anything after it.
 		if len(p.args) > 0 {
 			return nil
 		}
-		return logFileNames(logDir)
+		return append(logFileNames(logDir), "--last")
+	case "export":
+		return exportCandidates(p.args, logDir)
 	case "completion":
 		if len(p.args) > 0 {
 			return nil
@@ -140,4 +141,52 @@ func logFileNames(logDir string) []string {
 		names = append(names, e.Name())
 	}
 	return names
+}
+
+// exportCandidates follows export's options, which may appear after its file.
+func exportCandidates(args []string, logDir string) []string {
+	var hasFile, hasLast, hasCommand, hasOutput bool
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		name, _, hasValue := strings.Cut(strings.TrimLeft(arg, "-"), "=")
+		if arg == "--" {
+			return logFileNames(logDir)
+		}
+		if strings.HasPrefix(arg, "-") {
+			switch name {
+			case "last":
+				hasLast = true
+			case "command", "output", "o":
+				if name == "command" {
+					hasCommand = true
+				} else {
+					hasOutput = true
+				}
+				if !hasValue {
+					if i+1 < len(args) && args[i+1] == "=" {
+						i++
+					}
+					if i+1 == len(args) {
+						return nil
+					}
+					i++
+				}
+			default:
+				return nil
+			}
+		} else {
+			hasFile = true
+		}
+	}
+	var result []string
+	if !hasFile && !hasLast {
+		result = append(logFileNames(logDir), "--last")
+	}
+	if !hasCommand {
+		result = append(result, "--command")
+	}
+	if !hasOutput {
+		result = append(result, "--output", "-o")
+	}
+	return result
 }

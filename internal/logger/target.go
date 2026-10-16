@@ -25,7 +25,7 @@ func TargetDetails(args []string) (address, hostname string) {
 	if len(args) == 0 {
 		return "", ""
 	}
-	raw := targetAddress(args)
+	raw := TargetAddress(args)
 	switch args[0] {
 	case "ssh":
 		resolved := resolveSSHHostname(raw) // may resolve SSH config alias
@@ -40,9 +40,9 @@ func TargetDetails(args []string) (address, hostname string) {
 	}
 }
 
-// targetAddress extracts the typed target without starting another process.
+// TargetAddress extracts the typed target without starting another process.
 // Filename generation only needs this value; alias resolution is for banners.
-func targetAddress(args []string) string {
+func TargetAddress(args []string) string {
 	if len(args) == 0 {
 		return ""
 	}
@@ -66,7 +66,7 @@ func generateFilename(args []string) string {
 	// Use the typed host (address without user@) as the filename component so
 	// SSH aliases like "edgeSW03" are preserved instead of being replaced by
 	// the resolved IP from ssh -G.
-	host := targetAddress(args)
+	host := TargetAddress(args)
 	if idx := strings.LastIndex(host, "@"); idx >= 0 {
 		host = host[idx+1:]
 	}

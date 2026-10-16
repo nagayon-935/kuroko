@@ -263,3 +263,64 @@ func TestRunSelectorNonTerminal(t *testing.T) {
 		t.Error("expected error when stdin is not a terminal")
 	}
 }
+
+func TestSelectorSessionDetailsAndTargetFilter(t *testing.T) {
+	dir := t.TempDir()
+	text := "# kuroko session log\n# Started : 2026-10-08T10:00:00+09:00\n# Command : ssh -p 2222 user@RouterA\n# Target  : user@RouterA\n# " + strings.Repeat("-", 68) + "\n\noutput\n\n# " + strings.Repeat("-", 68) + "\n# Ended   : 2026-10-08T10:02:03+09:00\n# Exit    : 7\n"
+	saveViewerLog(t, dir, "session.log.gz", text)
+	s, err := newSelector(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.items) != 1 || s.items[0].status() != "exit 7" || s.items[0].summary.Duration() != 123*time.Second {
+		t.Fatalf("missing session details: %+v", s.items)
+	}
+	for _, query := range []string{"routera", "exit 7", "ssh"} {
+		s.searchQuery = query
+		s.updateFilter()
+		if len(s.filtered) != 1 {
+			t.Fatalf("no match for %s", query)
+		}
+	}
+	restore := captureStdout(t)
+	s.draw()
+	out := restore()
+	for _, value := range []string{"2026-10-08 10:00:00", "exit 7", "2m3s", "user@RouterA"} {
+		if !strings.Contains(out, value) {
+			t.Fatalf("missing %s in selector", value)
+		}
+	}
+}
+
+func TestSelectorLegacyTargetAndOpenStatus(t *testing.T) {
+	dir := t.TempDir()
+	saveViewerLog(t, dir, "old.log", "# kuroko session log\n# Started : 2026-10-08T10:00:00+09:00\n# Command : ssh -p 2222 user@router\n# ---\n\npartial output\n")
+	s, err := newSelector(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.items[0].summary.Target != "user@router" || s.items[0].status() != "open" {
+		t.Fatalf("legacy summary=%+v", s.items[0])
+	}
+}
+
+func TestSelectorSortUsesStartedRatherThanModified(t *testing.T) {
+	dir := t.TempDir()
+	older := saveViewerLog(t, dir, "copied.log", "# kuroko session log\n# Started : 2026-10-07T10:00:00+09:00\n# Command : bash\n# ---\n")
+	saveViewerLog(t, dir, "new.log", "# kuroko session log\n# Started : 2026-10-08T10:00:00+09:00\n# Command : bash\n# ---\n")
+	future := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(older, future, future); err != nil {
+		t.Fatal(err)
+	}
+	s, err := newSelector(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.items[0].name != "new.log" {
+		t.Fatalf("newest=%s", s.items[0].name)
+	}
+	s.toggleSort()
+	if s.items[0].name != "copied.log" {
+		t.Fatalf("oldest=%s", s.items[0].name)
+	}
+}

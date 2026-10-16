@@ -2,7 +2,6 @@ package viewer
 
 import (
 	"bytes"
-	"compress/gzip"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +15,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/ryu/kuroko/internal/logger"
+	"github.com/ryu/kuroko/internal/logstore"
 	"github.com/ryu/kuroko/internal/textwidth"
 )
 
@@ -56,9 +56,10 @@ func truncateDisplay(s string, width int) string {
 }
 
 type CommandMetadata struct {
-	Timestamp string `json:"timestamp"`
-	Command   string `json:"command"`
-	Offset    int64  `json:"offset"`
+	Timestamp    string `json:"timestamp"`
+	Command      string `json:"command"`
+	Offset       int64  `json:"offset"`
+	WholeSession bool   `json:"-"`
 }
 
 type Pane int
@@ -78,6 +79,7 @@ const (
 var mouseRegexp = regexp.MustCompile(`^\x1b\[<(\d+);(\d+);(\d+)([Mm])`)
 
 type Viewer struct {
+	statusMessage      string
 	logPath            string
 	logData            []byte
 	allCmds            []CommandMetadata
@@ -106,24 +108,12 @@ func Run(logPath string) error {
 }
 
 func newViewer(logPath string) (*Viewer, error) {
-	// Read log file (decompressing if gzip)
-	f, err := os.Open(logPath)
+	r, err := logstore.Open(logPath)
 	if err != nil {
 		return nil, fmt.Errorf("opening log file: %w", err)
 	}
-	defer f.Close()
-
-	var logData []byte
-	if strings.HasSuffix(logPath, ".gz") {
-		gr, err := gzip.NewReader(f)
-		if err != nil {
-			return nil, fmt.Errorf("reading gzip: %w", err)
-		}
-		defer gr.Close()
-		logData, err = io.ReadAll(gr)
-	} else {
-		logData, err = io.ReadAll(f)
-	}
+	defer r.Close()
+	logData, err := io.ReadAll(r)
 	if err != nil {
 		return nil, fmt.Errorf("reading log data: %w", err)
 	}
@@ -136,6 +126,7 @@ func newViewer(logPath string) (*Viewer, error) {
 	}
 
 	v.parseMetadata()
+	v.allCmds = append([]CommandMetadata{{Command: "Entire session", WholeSession: true}}, v.allCmds...)
 	v.updateFilter()
 	v.updateOutput()
 	return v, nil
@@ -151,26 +142,9 @@ func (v *Viewer) updateOutput() {
 		return
 	}
 
-	actualIdx := v.filteredIdx[v.selected]
-	cmd := v.allCmds[actualIdx]
-	offset := cmd.Offset
-
-	// End offset is the next command's offset or end of log data
-	var endOffset int64 = int64(len(v.logData))
-	if actualIdx < len(v.allCmds)-1 {
-		endOffset = v.allCmds[actualIdx+1].Offset
-	}
-
-	if offset < int64(len(v.logData)) && endOffset <= int64(len(v.logData)) && offset <= endOffset {
-		cmdOutput := string(v.logData[offset:endOffset])
-		rawLines := strings.Split(cmdOutput, "\n")
-		for _, rl := range rawLines {
-			// Strip metadata comments so they are not shown on TUI
-			if strings.HasPrefix(rl, "# kuroko:cmd:") {
-				continue
-			}
-			v.currentOutputLines = append(v.currentOutputLines, rl)
-		}
+	text, err := v.selectionText()
+	if err == nil {
+		v.currentOutputLines = strings.Split(string(text), "\n")
 	}
 
 	v.updateMatches()
@@ -322,7 +296,7 @@ func (v *Viewer) updateFilter() {
 	v.filteredIdx = nil
 	query := strings.ToLower(v.searchQuery)
 	for i, c := range v.allCmds {
-		if query == "" || strings.Contains(strings.ToLower(c.Command), query) {
+		if query == "" || (!c.WholeSession && strings.Contains(strings.ToLower(c.Command), query)) {
 			v.filteredIdx = append(v.filteredIdx, i)
 		}
 	}
@@ -365,6 +339,7 @@ func (v *Viewer) loop() error {
 		}
 
 		key := buf[:n]
+		v.statusMessage = ""
 		if bytes.HasPrefix(key, []byte("\x1b[<")) {
 			m := mouseRegexp.FindSubmatch(key)
 			if len(m) == 5 {
@@ -372,10 +347,7 @@ func (v *Viewer) loop() error {
 				x, _ := strconv.Atoi(string(m[2]))
 				y, _ := strconv.Atoi(string(m[3]))
 
-				leftWidth := (v.width * 35) / 100
-				if leftWidth < 30 {
-					leftWidth = 30
-				}
+				leftWidth, _ := paneWidths(v.width)
 				bodyHeight := v.bodyHeight()
 
 				if btn == 64 { // Scroll Up
@@ -477,6 +449,8 @@ func (v *Viewer) loop() error {
 			// Normal mode navigation
 			if len(key) == 1 {
 				switch key[0] {
+				case 'e': // Export the selected command or entire session
+					v.exportSelection()
 				case 'q', 27: // q or Esc
 					return nil
 				case 3: // Ctrl+C
@@ -628,6 +602,20 @@ func (v *Viewer) loop() error {
 	}
 }
 
+// Keep both panes usable on narrow terminals; wide terminals retain the
+// original minimum timeline width. Mouse hit testing uses the same layout.
+func paneWidths(width int) (left, right int) {
+	if width < 3 {
+		return 0, max(0, width-1)
+	}
+	left = width * 35 / 100
+	if width >= 80 {
+		left = max(left, 30)
+	}
+	left = max(1, min(left, width-2))
+	return left, width - left - 1
+}
+
 func (v *Viewer) draw() {
 	v.width, v.height, _ = term.GetSize(int(os.Stdin.Fd()))
 	if v.width <= 0 || v.height <= 0 {
@@ -641,11 +629,7 @@ func (v *Viewer) draw() {
 
 	// Calculate layouts
 	// Left pane: 35% of width, min 30 chars
-	leftWidth := (v.width * 35) / 100
-	if leftWidth < 30 {
-		leftWidth = 30
-	}
-	rightWidth := v.width - leftWidth - 1 // -1 for border
+	leftWidth, rightWidth := paneWidths(v.width)
 	bodyHeight := v.bodyHeight()
 	v.timelineScroll = followSelection(v.selected, v.timelineScroll, bodyHeight)
 
@@ -685,7 +669,11 @@ func (v *Viewer) draw() {
 				indicator = "> "
 			}
 
-			leftText = fmt.Sprintf("%s[%s] %s", indicator, ts, cmd.Command)
+			if cmd.WholeSession {
+				leftText = indicator + "[Session] Entire session"
+			} else {
+				leftText = fmt.Sprintf("%s[%s] %d. %s", indicator, ts, cmdIdx, cmd.Command)
+			}
 			if n := textwidth.String(leftText); n > leftWidth {
 				leftText = truncateDisplay(leftText, leftWidth)
 			} else {
@@ -749,12 +737,12 @@ func (v *Viewer) draw() {
 	// Draw Footer
 	var footerText string
 	if v.activePane == PaneTimeline {
-		footerText = " [Tab/h/l]: Pane  [j/k/Arrows]: Move Command  [/]: Search Cmd  [f]: Find in Output  [q]: Quit"
+		footerText = " [e]: Export  [Tab]: Pane  [j/k]: Move  [/]: Search Cmd  [f]: Find  [q]: Quit"
 	} else {
 		if len(v.matchLines) > 0 {
-			footerText = fmt.Sprintf(" [Tab/h/l]: Pane  [j/k/PgUpDown]: Scroll  [n/N]: Match %d/%d  [f]: Find in Output  [q]: Quit", v.activeMatch+1, len(v.matchLines))
+			footerText = fmt.Sprintf(" [e]: Export  [Tab]: Pane  [j/k/PgUpDown]: Scroll  [n/N]: %d/%d  [f]: Find  [q]: Quit", v.activeMatch+1, len(v.matchLines))
 		} else {
-			footerText = " [Tab/h/l]: Pane  [j/k/PgUpDown]: Scroll  [f]: Find in Output  [q]: Quit"
+			footerText = " [e]: Export  [Tab]: Pane  [j/k/PgUpDown]: Scroll  [f]: Find  [q]: Quit"
 		}
 	}
 
@@ -764,6 +752,9 @@ func (v *Viewer) draw() {
 		} else {
 			footerText = fmt.Sprintf(" Find in output (Enter to confirm): %s_", v.searchQuery)
 		}
+	}
+	if v.statusMessage != "" {
+		footerText = " " + v.statusMessage
 	}
 	if n := textwidth.String(footerText); n > v.width {
 		footerText = truncateDisplay(footerText, v.width)

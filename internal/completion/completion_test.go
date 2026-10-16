@@ -33,13 +33,13 @@ func TestCandidates(t *testing.T) {
 		{
 			name: "empty context lists subcommands and global flags",
 			ctx:  nil,
-			want: []string{"logs", "view", "help", "completion",
+			want: []string{"logs", "view", "export", "help", "completion",
 				"--log-dir", "-d", "--help", "-h", "--version", "-v"},
 		},
 		{
 			name: "view lists log files from configured log dir",
 			ctx:  []string{"view"},
-			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log"},
+			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log", "--last"},
 		},
 		{
 			name: "logs subcommand offers nothing (flags after it are ignored)",
@@ -64,17 +64,17 @@ func TestCandidates(t *testing.T) {
 		{
 			name: "--log-dir=DIR single token redirects view completion",
 			ctx:  []string{"--log-dir=" + otherDir, "view"},
-			want: []string{"20260101_010000_bash.log"},
+			want: []string{"20260101_010000_bash.log", "--last"},
 		},
 		{
 			name: "--log-dir = DIR split by COMP_WORDBREAKS redirects view completion",
 			ctx:  []string{"--log-dir", "=", otherDir, "view"},
-			want: []string{"20260101_010000_bash.log"},
+			want: []string{"20260101_010000_bash.log", "--last"},
 		},
 		{
 			name: "single-dash -log-dir form redirects view completion",
 			ctx:  []string{"-log-dir", otherDir, "view"},
-			want: []string{"20260101_010000_bash.log"},
+			want: []string{"20260101_010000_bash.log", "--last"},
 		},
 		{
 			name: "help flag short-circuits: main prints usage and exits",
@@ -89,27 +89,27 @@ func TestCandidates(t *testing.T) {
 		{
 			name: "help flag explicitly set false does not short-circuit",
 			ctx:  []string{"--help=false", "view"},
-			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log"},
+			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log", "--last"},
 		},
 		{
 			name: "empty log-dir value falls back to configured dir (like config.Load)",
 			ctx:  []string{"--log-dir=", "view"},
-			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log"},
+			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log", "--last"},
 		},
 		{
 			name: "last log-dir wins, and an empty last value means configured dir",
 			ctx:  []string{"-d", otherDir, "-d=", "view"},
-			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log"},
+			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log", "--last"},
 		},
 		{
 			name: "last non-empty log-dir wins",
 			ctx:  []string{"-d", "/nonexistent", "-d", otherDir, "view"},
-			want: []string{"20260101_010000_bash.log"},
+			want: []string{"20260101_010000_bash.log", "--last"},
 		},
 		{
 			name: "double dash terminates flags",
 			ctx:  []string{"--", "view"},
-			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log"},
+			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log", "--last"},
 		},
 		{
 			name: "completion subcommand lists supported shells",
@@ -119,7 +119,7 @@ func TestCandidates(t *testing.T) {
 		{
 			name: "log-dir override redirects view completion",
 			ctx:  []string{"-d", otherDir, "view"},
-			want: []string{"20260101_010000_bash.log"},
+			want: []string{"20260101_010000_bash.log", "--last"},
 		},
 		{
 			name: "unknown leading word (wrapped command) yields no candidates",
@@ -171,5 +171,30 @@ func TestWriteScript(t *testing.T) {
 				t.Fatalf("WriteScript(%s) expected error, got nil", shell)
 			}
 		})
+	}
+}
+
+func TestExportCandidates(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "session.log"), []byte("output"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{LogDir: dir}
+	for _, tt := range []struct {
+		ctx  []string
+		want []string
+	}{
+		{[]string{"export"}, []string{"session.log", "--last", "--command", "--output", "-o"}},
+		{[]string{"export", "--last"}, []string{"--command", "--output", "-o"}},
+		{[]string{"export", "session.log"}, []string{"--command", "--output", "-o"}},
+		{[]string{"export", "--command"}, nil},
+		{[]string{"export", "-o"}, nil},
+		{[]string{"export", "--last", "--command", "2"}, []string{"--output", "-o"}},
+		{[]string{"export", "--last", "--command", "=", "2", "-o", "out.txt"}, nil},
+	} {
+		got := Candidates(tt.ctx, cfg)
+		if !reflect.DeepEqual(got, tt.want) {
+			t.Fatalf("Candidates(%v)=%v; want %v", tt.ctx, got, tt.want)
+		}
 	}
 }

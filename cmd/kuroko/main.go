@@ -7,7 +7,6 @@ import (
 
 	"github.com/ryu/kuroko/internal/completion"
 	"github.com/ryu/kuroko/internal/config"
-	"github.com/ryu/kuroko/internal/logstore"
 	"github.com/ryu/kuroko/internal/session"
 	"github.com/ryu/kuroko/internal/viewer"
 )
@@ -32,6 +31,9 @@ Examples:
   kuroko bash
   kuroko logs           List saved logs
   kuroko view <logfile>  View a saved log session interactively
+  kuroko view --last     View the most recent session
+  kuroko export --last --command 1 -o command.txt  Export a command and output
+  kuroko export <logfile>  Export an entire session to stdout
   kuroko completion bash  Print a bash completion script
 
 Logs are saved to ~/.config/kuroko/logs/ by default.
@@ -96,23 +98,17 @@ func main() {
 		}
 		os.Exit(0)
 	case "view":
-		if len(rest) < 2 {
-			fatalf("usage: kuroko view <logfile>")
-		}
-		// A bare name (e.g. from shell completion) falls back to the log
-		// dir. Resolve, not Load: viewing must not create directories.
-		path, err := logstore.ResolveLogFile(rest[1], func() (string, error) {
-			cfg, err := config.Resolve(config.Options{LogDir: logDir})
-			if err != nil {
-				return "", err
-			}
-			return cfg.LogDir, nil
-		})
+		path, err := resolveLogArgument(rest[1:], logDir)
 		if err != nil {
-			fatalf("config error: %v", err)
+			fatalf("view error: %v", err)
 		}
 		if err := viewer.Run(path); err != nil {
 			fatalf("viewer error: %v", err)
+		}
+		os.Exit(0)
+	case "export":
+		if err := runExport(rest[1:], logDir, os.Stdout, os.Stderr); err != nil {
+			fatalf("export error: %v", err)
 		}
 		os.Exit(0)
 	case "completion":

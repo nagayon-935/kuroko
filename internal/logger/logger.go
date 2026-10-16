@@ -252,6 +252,7 @@ type Logger struct {
 	cursorRow        int          // index into pendingRows the next '\n' commit lands on; == len(pendingRows) means "new row"
 	closed           bool
 	closeErr         error
+	writeErr         error
 }
 
 func New(logDir string, args []string, redactionEnabled bool) (*Logger, error) {
@@ -263,9 +264,10 @@ func New(logDir string, args []string, redactionEnabled bool) (*Logger, error) {
 	path := f.Name()
 
 	header := fmt.Sprintf(
-		"# kuroko session log\n# Started : %s\n# Command : %s\n# %s\n\n",
-		time.Now().Format(time.RFC3339),
+		"# kuroko session log\n# Started : %s\n# Command : %s\n# Target  : %s\n# %s\n\n",
+		time.Now().Format(time.RFC3339Nano),
 		strings.Join(args, " "),
+		TargetAddress(args),
 		strings.Repeat("-", 68),
 	)
 	if _, err := f.WriteString(header); err != nil {
@@ -316,7 +318,11 @@ func (l *Logger) Write(p []byte) (int, error) {
 		data = data[:len(data)-n]
 	}
 
-	return len(p), l.writeFiltered(data)
+	err := l.writeFiltered(data)
+	if err != nil && l.writeErr == nil {
+		l.writeErr = err
+	}
+	return len(p), err
 }
 
 // writeFiltered handles alternate-screen suppression.
@@ -710,7 +716,7 @@ func (l *Logger) Close(exitCode int) error {
 	defer l.mu.Unlock()
 	if !l.closed {
 		l.closed = true
-		l.closeErr = l.doClose(exitCode)
+		l.closeErr = errors.Join(l.writeErr, l.doClose(exitCode))
 	}
 	return l.closeErr
 }
@@ -765,7 +771,7 @@ func (l *Logger) doClose(exitCode int) (err error) {
 	footer := fmt.Sprintf(
 		"\n# %s\n# Ended   : %s\n# Exit    : %d\n",
 		strings.Repeat("-", 68),
-		time.Now().Format(time.RFC3339),
+		time.Now().Format(time.RFC3339Nano),
 		exitCode,
 	)
 	_, err = l.file.WriteString(footer)

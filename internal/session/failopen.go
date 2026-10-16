@@ -17,9 +17,10 @@ import (
 // (e.g. disk full). PTY transparency to the terminal must never depend on
 // the log succeeding.
 type failOpenWriter struct {
-	w        io.Writer
-	warnOnce sync.Once
-	failed   atomic.Bool
+	w         io.Writer
+	warnOnce  sync.Once
+	failed    atomic.Bool
+	onFailure func()
 }
 
 func newFailOpenWriter(w io.Writer) *failOpenWriter {
@@ -32,6 +33,9 @@ func (f *failOpenWriter) Write(p []byte) (int, error) {
 		if err != nil || n != len(p) {
 			f.failed.Store(true)
 			f.warnOnce.Do(func() {
+				if f.onFailure != nil {
+					f.onFailure()
+				}
 				if err == nil {
 					err = io.ErrShortWrite
 				}
