@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 )
 
 type Config struct {
@@ -78,10 +77,10 @@ func Resolve(opt Options) (*Config, error) {
 		return nil, err
 	}
 
-	configDir := filepath.Join(home, ".kuroko")
+	paths := PathsForHome(home)
 
 	cfg := &Config{
-		LogDir: filepath.Join(configDir, "logs"),
+		LogDir: paths.LogDirectory,
 		Notifier: NotifierConfig{
 			Type: "none",
 		},
@@ -103,15 +102,14 @@ func Resolve(opt Options) (*Config, error) {
 	}
 
 	// 1. config.json
-	configFile := filepath.Join(configDir, "config.json")
+	configFile := paths.ConfigFile
 	data, err := os.ReadFile(configFile)
 	if os.IsNotExist(err) {
 		// Keep old settings available until an explicit, verified migration.
-		legacyDir := filepath.Join(home, ".config", "kuroko")
-		configFile = filepath.Join(legacyDir, "config.json")
+		configFile = paths.LegacyConfigFile
 		data, err = os.ReadFile(configFile)
-		if info, statErr := os.Stat(filepath.Join(legacyDir, "logs")); statErr == nil && info.IsDir() {
-			cfg.LogDir = filepath.Join(legacyDir, "logs")
+		if info, statErr := os.Stat(paths.LegacyLogDirectory); statErr == nil && info.IsDir() {
+			cfg.LogDir = paths.LegacyLogDirectory
 		}
 	}
 	if err == nil {

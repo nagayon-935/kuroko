@@ -113,7 +113,7 @@ func RotateLogs(logDir string, maxAgeDays int, maxTotalSizeMB int) error {
 	maxAge := time.Duration(maxAgeDays) * 24 * time.Hour
 
 	for _, entry := range entries {
-		name := entry.Name()
+		name := entry.RelativePath
 
 		info, err := entry.Info()
 		if err != nil {
@@ -123,7 +123,7 @@ func RotateLogs(logDir string, maxAgeDays int, maxTotalSizeMB int) error {
 			continue
 		}
 
-		path := filepath.Join(logDir, name)
+		path := entry.Path
 		modTime := info.ModTime()
 		if activeLog(path) {
 			continue

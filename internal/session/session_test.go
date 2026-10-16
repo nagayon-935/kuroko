@@ -113,7 +113,7 @@ func TestSessionRunWithCompression(t *testing.T) {
 	}
 	var gzFound bool
 	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".gz") {
+		if strings.HasSuffix(e.RelativePath, ".gz") {
 			gzFound = true
 			break
 		}
@@ -146,8 +146,8 @@ func TestSessionRunWithCompressionThreshold(t *testing.T) {
 		t.Fatalf("ReadDir: %v", err)
 	}
 	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".gz") {
-			t.Errorf("unexpected .gz file %q; file was below threshold", e.Name())
+		if strings.HasSuffix(e.RelativePath, ".gz") {
+			t.Errorf("unexpected .gz file %q; file was below threshold", e.RelativePath)
 		}
 	}
 }

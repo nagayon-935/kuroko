@@ -12,26 +12,33 @@ import (
 	"strings"
 )
 
-// ListLogFiles enumerates regular .log/.log.gz files recursively, without
-// following symlinks. Name returns a path relative to dir, so every caller
-// (selector, completion, rotation, latest) uses the same unambiguous paths.
-func ListLogFiles(dir string) ([]os.DirEntry, error) {
-	var logs []os.DirEntry
+// LogFile keeps the path used to open a log separate from its display path.
+// Metadata is read lazily so each caller can handle disappearing files as
+// appropriate for its operation.
+type LogFile struct {
+	Path         string
+	RelativePath string
+	entry        fs.DirEntry
+}
+
+func (f LogFile) Info() (os.FileInfo, error) { return f.entry.Info() }
+
+// ListLogFiles enumerates regular .log/.log.gz files recursively in lexical
+// path order, without following symlinks. Paths are anchored at dir.
+func ListLogFiles(dir string) ([]LogFile, error) {
+	var logs []LogFile
 	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if entry.IsDir() {
-			return nil
-		}
-		if !IsLogName(entry.Name()) || !entry.Type().IsRegular() {
+		if entry.IsDir() || !IsLogName(entry.Name()) || !entry.Type().IsRegular() {
 			return nil
 		}
 		rel, err := filepath.Rel(dir, path)
 		if err != nil {
 			return err
 		}
-		logs = append(logs, relativeEntry{DirEntry: entry, name: rel})
+		logs = append(logs, LogFile{Path: path, RelativePath: rel, entry: entry})
 		return nil
 	})
 	if err != nil {
@@ -39,13 +46,6 @@ func ListLogFiles(dir string) ([]os.DirEntry, error) {
 	}
 	return logs, nil
 }
-
-type relativeEntry struct {
-	os.DirEntry
-	name string
-}
-
-func (e relativeEntry) Name() string { return e.name }
 
 func IsLogName(name string) bool {
 	return strings.HasSuffix(name, ".log") || strings.HasSuffix(name, ".log.gz")
@@ -79,8 +79,8 @@ func ResolveLogFile(arg string, logDir func() (string, error)) (string, error) {
 	}
 	var matches []string
 	for _, entry := range entries {
-		if filepath.Base(entry.Name()) == arg {
-			matches = append(matches, entry.Name())
+		if filepath.Base(entry.RelativePath) == arg {
+			matches = append(matches, entry.RelativePath)
 		}
 	}
 	if len(matches) > 1 {

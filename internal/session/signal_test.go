@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -278,7 +277,7 @@ func TestHandleTerminationSignalsReactsToSIGINT(t *testing.T) {
 	if err != nil || len(entries) == 0 {
 		t.Fatalf("expected a log file in %s; ReadDir err=%v entries=%v", logDir, err, entries)
 	}
-	data, err := os.ReadFile(filepath.Join(logDir, entries[0].Name()))
+	data, err := os.ReadFile(entries[0].Path)
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}

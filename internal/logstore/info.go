@@ -44,7 +44,7 @@ func Inspect(root string) (StorageInfo, error) {
 		if err != nil {
 			return result, err
 		}
-		group := filepath.Dir(entry.Name())
+		group := filepath.Dir(entry.RelativePath)
 		if group == "." {
 			group = "unclassified"
 		}
