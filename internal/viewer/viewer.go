@@ -23,6 +23,13 @@ import (
 // blank spacer line, and the footer, leaving the remainder for the body.
 const chromeHeight = 3
 
+const (
+	// Save screen, hide cursor, clear screen, and enable mouse tracking (SGR 1006).
+	enterTUISeq = "\x1b[?1049h\x1b[?25l\x1b[2J\x1b[?1000h\x1b[?1006h"
+	// Disable mouse tracking, show cursor, and restore alternate screen.
+	exitTUISeq = "\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l"
+)
+
 // truncateDisplay truncates s to at most width terminal columns, appending
 // "..." when truncated. Width is measured with textwidth.String rather than
 // rune count, since East Asian Wide/Fullwidth characters (e.g. Japanese
@@ -53,6 +60,19 @@ func truncateDisplay(s string, width int) string {
 		col += w
 	}
 	return b.String() + suffix
+}
+
+// fitDisplay truncates or right-pads s with spaces so its terminal display
+// width matches width columns.
+func fitDisplay(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if n := textwidth.String(s); n > width {
+		return truncateDisplay(s, width)
+	} else {
+		return s + strings.Repeat(" ", width-n)
+	}
 }
 
 type CommandMetadata struct {
@@ -308,6 +328,40 @@ func (v *Viewer) updateFilter() {
 	}
 }
 
+func (v *Viewer) moveTimeline(delta int) {
+	next := v.selected + delta
+	if next >= 0 && next < len(v.filteredIdx) {
+		v.selected = next
+		v.updateOutput()
+	}
+}
+
+func (v *Viewer) scrollOutput(delta int) {
+	bodyHeight := v.bodyHeight()
+	v.outputScroll = max(0, min(v.outputScroll+delta, max(0, len(v.currentOutputLines)-bodyHeight)))
+}
+
+func (v *Viewer) stepActivePane(timelineDelta, outputDelta int) {
+	if v.activePane == PaneTimeline {
+		v.moveTimeline(timelineDelta)
+	} else {
+		v.scrollOutput(outputDelta)
+	}
+}
+
+func (v *Viewer) onSearchQueryChanged() {
+	if v.searchMode == SearchCommands {
+		v.updateFilter()
+		v.updateOutput()
+	} else {
+		v.outputQuery = v.searchQuery
+		v.updateMatches()
+		if len(v.matchLines) > 0 {
+			v.scrollToLine(v.matchLines[v.activeMatch], v.bodyHeight())
+		}
+	}
+}
+
 func (v *Viewer) loop() error {
 	// Enter raw mode
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
@@ -317,9 +371,9 @@ func (v *Viewer) loop() error {
 	defer term.Restore(int(os.Stdin.Fd()), oldState)
 
 	// Save screen, hide cursor, clear screen, and enable mouse tracking (SGR 1006)
-	_, _ = os.Stdout.Write([]byte("\x1b[?1049h\x1b[?25l\x1b[2J\x1b[?1000h\x1b[?1006h"))
+	_, _ = os.Stdout.Write([]byte(enterTUISeq))
 	defer func() {
-		_, _ = os.Stdout.Write([]byte("\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l"))
+		_, _ = os.Stdout.Write([]byte(exitTUISeq))
 	}()
 
 	// Sleep slightly to allow the terminal to process the buffer switch and clear screen
@@ -348,34 +402,18 @@ func (v *Viewer) loop() error {
 				y, _ := strconv.Atoi(string(m[3]))
 
 				leftWidth, _ := paneWidths(v.width)
-				bodyHeight := v.bodyHeight()
 
 				if btn == 64 { // Scroll Up
 					if x <= leftWidth {
-						if v.selected > 0 {
-							v.selected--
-							v.updateOutput()
-						}
+						v.moveTimeline(-1)
 					} else if x > leftWidth+1 {
-						v.outputScroll -= 3
-						if v.outputScroll < 0 {
-							v.outputScroll = 0
-						}
+						v.scrollOutput(-3)
 					}
 				} else if btn == 65 { // Scroll Down
 					if x <= leftWidth {
-						if v.selected < len(v.filteredIdx)-1 {
-							v.selected++
-							v.updateOutput()
-						}
+						v.moveTimeline(1)
 					} else if x > leftWidth+1 {
-						v.outputScroll += 3
-						if v.outputScroll > len(v.currentOutputLines)-bodyHeight {
-							v.outputScroll = len(v.currentOutputLines) - bodyHeight
-						}
-						if v.outputScroll < 0 {
-							v.outputScroll = 0
-						}
+						v.scrollOutput(3)
 					}
 				} else if btn == 0 { // Left click press
 					r := y - 3
@@ -402,9 +440,8 @@ func (v *Viewer) loop() error {
 					if v.searchMode == SearchOutput {
 						v.outputQuery = v.searchQuery
 						v.updateMatches()
-						bodyHeight := v.bodyHeight()
 						if len(v.matchLines) > 0 {
-							v.scrollToLine(v.matchLines[v.activeMatch], bodyHeight)
+							v.scrollToLine(v.matchLines[v.activeMatch], v.bodyHeight())
 						}
 					}
 				case 27: // Esc
@@ -412,36 +449,14 @@ func (v *Viewer) loop() error {
 				case 127, 8: // Backspace
 					if len(v.searchQuery) > 0 {
 						v.searchQuery = v.searchQuery[:len(v.searchQuery)-1]
-						if v.searchMode == SearchCommands {
-							v.updateFilter()
-							v.updateOutput()
-							v.outputScroll = 0
-						} else {
-							v.outputQuery = v.searchQuery
-							v.updateMatches()
-							bodyHeight := v.bodyHeight()
-							if len(v.matchLines) > 0 {
-								v.scrollToLine(v.matchLines[v.activeMatch], bodyHeight)
-							}
-						}
+						v.onSearchQueryChanged()
 					}
 				case 3: // Ctrl+C
 					return nil
 				default:
 					if b >= 32 && b < 127 {
 						v.searchQuery += string(b)
-						if v.searchMode == SearchCommands {
-							v.updateFilter()
-							v.updateOutput()
-							v.outputScroll = 0
-						} else {
-							v.outputQuery = v.searchQuery
-							v.updateMatches()
-							bodyHeight := v.bodyHeight()
-							if len(v.matchLines) > 0 {
-								v.scrollToLine(v.matchLines[v.activeMatch], bodyHeight)
-							}
-						}
+						v.onSearchQueryChanged()
 					}
 				}
 			}
@@ -466,53 +481,16 @@ func (v *Viewer) loop() error {
 				case 'l':
 					v.activePane = PaneOutput
 				case 'j': // down
-					if v.activePane == PaneTimeline {
-						if v.selected < len(v.filteredIdx)-1 {
-							v.selected++
-							v.updateOutput()
-							v.outputScroll = 0
-						}
-					} else {
-						bodyHeight := v.bodyHeight()
-						v.outputScroll += 3
-						if v.outputScroll > len(v.currentOutputLines)-bodyHeight {
-							v.outputScroll = len(v.currentOutputLines) - bodyHeight
-						}
-						if v.outputScroll < 0 {
-							v.outputScroll = 0
-						}
-					}
+					v.stepActivePane(1, 3)
 				case 'k': // up
-					if v.activePane == PaneTimeline {
-						if v.selected > 0 {
-							v.selected--
-							v.updateOutput()
-							v.outputScroll = 0
-						}
-					} else {
-						v.outputScroll -= 3
-						if v.outputScroll < 0 {
-							v.outputScroll = 0
-						}
-					}
+					v.stepActivePane(-1, -3)
 				case 4: // Ctrl+D
 					if v.activePane == PaneOutput {
-						bodyHeight := v.bodyHeight()
-						v.outputScroll += bodyHeight
-						if v.outputScroll > len(v.currentOutputLines)-bodyHeight {
-							v.outputScroll = len(v.currentOutputLines) - bodyHeight
-						}
-						if v.outputScroll < 0 {
-							v.outputScroll = 0
-						}
+						v.scrollOutput(v.bodyHeight())
 					}
 				case 21: // Ctrl+U
 					if v.activePane == PaneOutput {
-						bodyHeight := v.bodyHeight()
-						v.outputScroll -= bodyHeight
-						if v.outputScroll < 0 {
-							v.outputScroll = 0
-						}
+						v.scrollOutput(-v.bodyHeight())
 					}
 				case '/': // Search Commands mode
 					v.inSearch = true
@@ -520,7 +498,6 @@ func (v *Viewer) loop() error {
 					v.searchQuery = ""
 					v.updateFilter()
 					v.updateOutput()
-					v.outputScroll = 0
 				case 'f': // Search Output mode
 					v.inSearch = true
 					v.searchMode = SearchOutput
@@ -528,49 +505,21 @@ func (v *Viewer) loop() error {
 				case 'n': // Next output search match
 					if len(v.matchLines) > 0 && v.activeMatch != -1 {
 						v.activeMatch = (v.activeMatch + 1) % len(v.matchLines)
-						bodyHeight := v.bodyHeight()
-						v.scrollToLine(v.matchLines[v.activeMatch], bodyHeight)
+						v.scrollToLine(v.matchLines[v.activeMatch], v.bodyHeight())
 					}
 				case 'N': // Previous output search match
 					if len(v.matchLines) > 0 && v.activeMatch != -1 {
 						v.activeMatch = (v.activeMatch - 1 + len(v.matchLines)) % len(v.matchLines)
-						bodyHeight := v.bodyHeight()
-						v.scrollToLine(v.matchLines[v.activeMatch], bodyHeight)
+						v.scrollToLine(v.matchLines[v.activeMatch], v.bodyHeight())
 					}
 				}
 			} else if len(key) == 3 && key[0] == 27 && key[1] == '[' {
 				// Arrow keys: Escape sequences (e.g. Esc [ A)
 				switch key[2] {
 				case 'A': // Up arrow
-					if v.activePane == PaneTimeline {
-						if v.selected > 0 {
-							v.selected--
-							v.updateOutput()
-							v.outputScroll = 0
-						}
-					} else {
-						v.outputScroll -= 3
-						if v.outputScroll < 0 {
-							v.outputScroll = 0
-						}
-					}
+					v.stepActivePane(-1, -3)
 				case 'B': // Down arrow
-					if v.activePane == PaneTimeline {
-						if v.selected < len(v.filteredIdx)-1 {
-							v.selected++
-							v.updateOutput()
-							v.outputScroll = 0
-						}
-					} else {
-						bodyHeight := v.bodyHeight()
-						v.outputScroll += 3
-						if v.outputScroll > len(v.currentOutputLines)-bodyHeight {
-							v.outputScroll = len(v.currentOutputLines) - bodyHeight
-						}
-						if v.outputScroll < 0 {
-							v.outputScroll = 0
-						}
-					}
+					v.stepActivePane(1, 3)
 				case 'C': // Right arrow
 					v.activePane = PaneOutput
 				case 'D': // Left arrow
@@ -578,23 +527,11 @@ func (v *Viewer) loop() error {
 				}
 			} else if len(key) == 4 && key[0] == 27 && key[1] == '[' && key[3] == '~' {
 				// PageUp / PageDown keys: e.g. Esc [ 5 ~ (PageUp), Esc [ 6 ~ (PageDown)
-				bodyHeight := v.bodyHeight()
-				if key[2] == '5' { // PageUp
-					if v.activePane == PaneOutput {
-						v.outputScroll -= bodyHeight
-						if v.outputScroll < 0 {
-							v.outputScroll = 0
-						}
-					}
-				} else if key[2] == '6' { // PageDown
-					if v.activePane == PaneOutput {
-						v.outputScroll += bodyHeight
-						if v.outputScroll > len(v.currentOutputLines)-bodyHeight {
-							v.outputScroll = len(v.currentOutputLines) - bodyHeight
-						}
-						if v.outputScroll < 0 {
-							v.outputScroll = 0
-						}
+				if v.activePane == PaneOutput {
+					if key[2] == '5' { // PageUp
+						v.scrollOutput(-v.bodyHeight())
+					} else if key[2] == '6' { // PageDown
+						v.scrollOutput(v.bodyHeight())
 					}
 				}
 			}
@@ -638,12 +575,7 @@ func (v *Viewer) draw() {
 	if v.activePane == PaneOutput {
 		paneStr = " PANE:  Timeline  [Output]"
 	}
-	header := fmt.Sprintf(" kuroko log viewer  [ File: %s ]%s", filepath.Base(v.logPath), paneStr)
-	if n := textwidth.String(header); n > v.width {
-		header = truncateDisplay(header, v.width)
-	} else {
-		header += strings.Repeat(" ", v.width-n)
-	}
+	header := fitDisplay(fmt.Sprintf(" kuroko log viewer  [ File: %s ]%s", filepath.Base(v.logPath), paneStr), v.width)
 	out.WriteString(fmt.Sprintf("\x1b[30;47m%s\x1b[0m\x1b[K\r\n", header))
 
 	// Draw Empty line between header and body
@@ -674,11 +606,7 @@ func (v *Viewer) draw() {
 			} else {
 				leftText = fmt.Sprintf("%s[%s] %d. %s", indicator, ts, cmdIdx, cmd.Command)
 			}
-			if n := textwidth.String(leftText); n > leftWidth {
-				leftText = truncateDisplay(leftText, leftWidth)
-			} else {
-				leftText += strings.Repeat(" ", leftWidth-n)
-			}
+			leftText = fitDisplay(leftText, leftWidth)
 
 			if timelineRow == v.selected {
 				// Highlight selected line in timeline
@@ -697,8 +625,7 @@ func (v *Viewer) draw() {
 		// 3. Right pane (Output with scroll and query highlight)
 		var rightText string
 		if r+v.outputScroll < len(v.currentOutputLines) {
-			line := v.currentOutputLines[r+v.outputScroll]
-			line = strings.ReplaceAll(line, "\r", "")
+			line := strings.ReplaceAll(v.currentOutputLines[r+v.outputScroll], "\r", "")
 
 			// Check if this line is in search matches
 			isMatch := false
@@ -711,13 +638,7 @@ func (v *Viewer) draw() {
 				}
 			}
 
-			truncated := line
-			if n := textwidth.String(line); n > rightWidth {
-				truncated = truncateDisplay(line, rightWidth)
-			} else {
-				truncated = line + strings.Repeat(" ", rightWidth-n)
-			}
-
+			truncated := fitDisplay(line, rightWidth)
 			if isMatch {
 				isActive := (matchIdx == v.activeMatch)
 				rightText = highlightQuery(truncated, v.outputQuery, isActive)
@@ -756,11 +677,7 @@ func (v *Viewer) draw() {
 	if v.statusMessage != "" {
 		footerText = " " + v.statusMessage
 	}
-	if n := textwidth.String(footerText); n > v.width {
-		footerText = truncateDisplay(footerText, v.width)
-	} else {
-		footerText += strings.Repeat(" ", v.width-n)
-	}
+	footerText = fitDisplay(footerText, v.width)
 	out.WriteString(fmt.Sprintf("\x1b[30;47m%s\x1b[0m\x1b[K", footerText))
 
 	os.Stdout.Write(out.Bytes())

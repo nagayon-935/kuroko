@@ -15,7 +15,6 @@ import (
 	"github.com/ryu/kuroko/internal/config"
 	"github.com/ryu/kuroko/internal/logger"
 	"github.com/ryu/kuroko/internal/logstore"
-	"github.com/ryu/kuroko/internal/textwidth"
 )
 
 type selectorItem struct {
@@ -133,6 +132,13 @@ func (s *LogSelector) updateFilter() {
 	}
 }
 
+func (s *LogSelector) moveSelection(delta int) {
+	next := s.selected + delta
+	if next >= 0 && next < len(s.filtered) {
+		s.selected = next
+	}
+}
+
 func (s *LogSelector) loop() error {
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
@@ -141,9 +147,9 @@ func (s *LogSelector) loop() error {
 	defer term.Restore(int(os.Stdin.Fd()), oldState)
 
 	// Save screen, hide cursor, clear screen, and enable mouse tracking
-	_, _ = os.Stdout.Write([]byte("\x1b[?1049h\x1b[?25l\x1b[2J\x1b[?1000h\x1b[?1006h"))
+	_, _ = os.Stdout.Write([]byte(enterTUISeq))
 	defer func() {
-		_, _ = os.Stdout.Write([]byte("\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l"))
+		_, _ = os.Stdout.Write([]byte(exitTUISeq))
 	}()
 
 	time.Sleep(50 * time.Millisecond)
@@ -168,13 +174,9 @@ func (s *LogSelector) loop() error {
 				y, _ := strconv.Atoi(string(m[3]))
 
 				if btn == 64 { // Scroll Up
-					if s.selected > 0 {
-						s.selected--
-					}
+					s.moveSelection(-1)
 				} else if btn == 65 { // Scroll Down
-					if s.selected < len(s.filtered)-1 {
-						s.selected++
-					}
+					s.moveSelection(1)
 				} else if btn == 0 { // Left click press
 					r := y - 3
 					if idx := clickRowToIndex(r, s.listScroll, len(s.filtered)); idx >= 0 {
@@ -215,13 +217,9 @@ func (s *LogSelector) loop() error {
 				case 3: // Ctrl+C
 					return nil
 				case 'j': // Down
-					if s.selected < len(s.filtered)-1 {
-						s.selected++
-					}
+					s.moveSelection(1)
 				case 'k': // Up
-					if s.selected > 0 {
-						s.selected--
-					}
+					s.moveSelection(-1)
 				case 's': // Toggle sort order
 					s.toggleSort()
 				case '/': // Filter mode
@@ -249,7 +247,7 @@ func (s *LogSelector) loop() error {
 						// mouse tracking on its own exit, so it must be re-enabled
 						// here or wheel/click navigation stays dead for the rest of
 						// the selector's lifetime.
-						_, _ = os.Stdout.Write([]byte("\x1b[?1049h\x1b[?25l\x1b[2J\x1b[?1000h\x1b[?1006h"))
+						_, _ = os.Stdout.Write([]byte(enterTUISeq))
 						time.Sleep(50 * time.Millisecond)
 						if viewErr != nil {
 							fmt.Fprintf(os.Stderr, "\r\n[kuroko] viewer error: %v\r\n", viewErr)
@@ -265,13 +263,9 @@ func (s *LogSelector) loop() error {
 			} else if len(key) == 3 && key[0] == 27 && key[1] == '[' {
 				switch key[2] {
 				case 'A': // Up
-					if s.selected > 0 {
-						s.selected--
-					}
+					s.moveSelection(-1)
 				case 'B': // Down
-					if s.selected < len(s.filtered)-1 {
-						s.selected++
-					}
+					s.moveSelection(1)
 				}
 			}
 		}
@@ -302,12 +296,7 @@ func (s *LogSelector) draw() {
 	s.listScroll = followSelection(s.selected, s.listScroll, bodyHeight)
 
 	// Draw Header
-	header := fmt.Sprintf(" kuroko logs selector  [ Dir: %s ]", s.logDir)
-	if n := textwidth.String(header); n > s.width {
-		header = truncateDisplay(header, s.width)
-	} else {
-		header += strings.Repeat(" ", s.width-n)
-	}
+	header := fitDisplay(fmt.Sprintf(" kuroko logs selector  [ Dir: %s ]", s.logDir), s.width)
 	out.WriteString(fmt.Sprintf("\x1b[30;47m%s\x1b[0m\x1b[K\r\n", header))
 	out.WriteString("\x1b[K\r\n")
 
@@ -338,11 +327,7 @@ func (s *LogSelector) draw() {
 					line = fmt.Sprintf("%s[%s] unreadable (%s) %s", indicator, ts, sizeStr, item.name)
 				}
 			}
-			if n := textwidth.String(line); n > s.width {
-				line = truncateDisplay(line, s.width)
-			} else {
-				line += strings.Repeat(" ", s.width-n)
-			}
+			line = fitDisplay(line, s.width)
 
 			if listRow == s.selected {
 				line = fmt.Sprintf("\x1b[30;47m%s\x1b[0m", line)
@@ -352,8 +337,7 @@ func (s *LogSelector) draw() {
 			if len(s.items) > 0 {
 				line = "No matching logs. Press / then Enter to clear the filter."
 			}
-			line = truncateDisplay(line, s.width)
-			line += strings.Repeat(" ", s.width-textwidth.String(line))
+			line = fitDisplay(line, s.width)
 		} else {
 			line = strings.Repeat(" ", s.width)
 		}
@@ -371,11 +355,7 @@ func (s *LogSelector) draw() {
 	if s.inSearch {
 		footerText = fmt.Sprintf(" Filter logs (Enter to confirm): %s_", s.searchQuery)
 	}
-	if n := textwidth.String(footerText); n > s.width {
-		footerText = truncateDisplay(footerText, s.width)
-	} else {
-		footerText += strings.Repeat(" ", s.width-n)
-	}
+	footerText = fitDisplay(footerText, s.width)
 	out.WriteString(fmt.Sprintf("\x1b[30;47m%s\x1b[0m\x1b[K", footerText))
 
 	os.Stdout.Write(out.Bytes())

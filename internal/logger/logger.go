@@ -423,11 +423,7 @@ func (l *Logger) processLine(data []byte) error {
 			// If pendingCR is set the \r was the CR half of a CRLF pair —
 			// do not reset lineCol; commit the content that is already there.
 			l.pendingCR = false
-			end := l.lineCol
-			if end > len(l.lineBuf) {
-				end = len(l.lineBuf)
-			}
-			out := renderLine(l.lineBuf[:end])
+			out := l.currentLine()
 
 			var hasCommand bool
 
@@ -447,29 +443,10 @@ func (l *Logger) processLine(data []byte) error {
 					if len(cmd) > 0 {
 						hasCommand = true
 					}
-					_ = cmd // cmd content already in out; variable used for hasCommand only
 				}
 			}
-			if !hasCommand && len(l.savedLine) > len(out) {
-				// Accept-line redraw happened.
-				bare := out
-				if len(bare) > 0 {
-					if prompt, cmd := SplitPrompt(l.savedLine); prompt != nil {
-						// Verify if the command in savedLine matches bare, or savedLine is just the prompt.
-						if bytes.Equal(cmd, bare) || len(cmd) == 0 {
-							// Case 2: Prompt + command matches bare command, or savedLine is just the prompt.
-							out = append(append([]byte{}, prompt...), bare...)
-							l.storedPrompt = append(l.storedPrompt[:0], prompt...)
-							hasCommand = true
-						} else if len(l.storedPrompt) > 0 {
-							// Case 3: History contamination (mismatch). Reconstruct from stored prompt.
-							out = append(append([]byte{}, l.storedPrompt...), bare...)
-							hasCommand = true
-						}
-					}
-				} else {
-					out = l.savedLine
-				}
+			if !hasCommand {
+				out, hasCommand = l.restoreSavedPrompt(out)
 			}
 
 			var meta []byte
@@ -520,6 +497,37 @@ func (l *Logger) processLine(data []byte) error {
 	return nil
 }
 
+func (l *Logger) currentLine() []byte {
+	return renderLine(l.lineBuf[:min(l.lineCol, len(l.lineBuf))])
+}
+
+// restoreSavedPrompt reconstructs the prompt when a readline accept-line
+// redraw overwrote the full prompt+command line with a shorter bare command.
+func (l *Logger) restoreSavedPrompt(out []byte) ([]byte, bool) {
+	if len(l.savedLine) <= len(out) {
+		return out, false
+	}
+	bare := out
+	if len(bare) == 0 {
+		return l.savedLine, false
+	}
+	prompt, cmd := SplitPrompt(l.savedLine)
+	if prompt == nil {
+		return out, false
+	}
+	// Verify if the command in savedLine matches bare, or savedLine is just the prompt.
+	if bytes.Equal(cmd, bare) || len(cmd) == 0 {
+		// Case 2: Prompt + command matches bare command, or savedLine is just the prompt.
+		l.storedPrompt = append(l.storedPrompt[:0], prompt...)
+		return append(append([]byte{}, prompt...), bare...), true
+	}
+	if len(l.storedPrompt) > 0 {
+		// Case 3: History contamination (mismatch). Reconstruct from stored prompt.
+		return append(append([]byte{}, l.storedPrompt...), bare...), true
+	}
+	return out, false
+}
+
 // snapshotSavedLine captures the current lineBuf, up to the cursor, into
 // savedLine when it looks like a valid shell prompt, then resets lineCol to
 // 0. It runs on the first escape or printable byte to arrive after a bare
@@ -528,11 +536,7 @@ func (l *Logger) processLine(data []byte) error {
 // readline's accept-line redraw.
 func (l *Logger) snapshotSavedLine() {
 	if l.lineCol > 0 {
-		end := l.lineCol
-		if end > len(l.lineBuf) {
-			end = len(l.lineBuf)
-		}
-		committed := renderLine(l.lineBuf[:end])
+		committed := l.currentLine()
 		if prompt, _ := SplitPrompt(committed); prompt != nil {
 			l.savedLine = append(l.savedLine[:0], committed...)
 			l.storedPrompt = append(l.storedPrompt[:0], prompt...)
@@ -761,26 +765,9 @@ func (l *Logger) doClose(exitCode int) (err error) {
 	}
 
 	// Flush any unterminated line; apply the same savedLine validation as processLine.
-	end := l.lineCol
-	if end > len(l.lineBuf) {
-		end = len(l.lineBuf)
-	}
-	out := renderLine(l.lineBuf[:end])
-	if prompt, _ := SplitPrompt(out); prompt != nil {
-		// Already has prompt.
-	} else if len(l.savedLine) > len(out) {
-		bare := out
-		if len(bare) > 0 {
-			if prompt, cmd := SplitPrompt(l.savedLine); prompt != nil {
-				if bytes.Equal(cmd, bare) || len(cmd) == 0 {
-					out = append(append([]byte{}, prompt...), bare...)
-				} else if len(l.storedPrompt) > 0 {
-					out = append(append([]byte{}, l.storedPrompt...), bare...)
-				}
-			}
-		} else {
-			out = l.savedLine
-		}
+	out := l.currentLine()
+	if prompt, _ := SplitPrompt(out); prompt == nil {
+		out, _ = l.restoreSavedPrompt(out)
 	}
 	if len(out) > 0 {
 		if l.redactionEnabled {
@@ -808,6 +795,15 @@ var (
 	sqlPasswordPattern  = regexp.MustCompile(`(?i)identified\s+by\s+'([^']+)'`)
 )
 
+func redactSubmatch(line []byte, re *regexp.Regexp, group int, placeholder []byte) []byte {
+	return re.ReplaceAllFunc(line, func(match []byte) []byte {
+		if parts := re.FindSubmatch(match); len(parts) > group {
+			return bytes.Replace(match, parts[group], placeholder, 1)
+		}
+		return match
+	})
+}
+
 func (l *Logger) redact(line []byte) []byte {
 	if !l.redactionEnabled {
 		return line
@@ -828,39 +824,10 @@ func (l *Logger) redact(line []byte) []byte {
 		return []byte("[PEM PRIVATE KEY DATA - REDACTED]")
 	}
 
-	// AWS Access Key ID
 	line = awsAccessKeyPattern.ReplaceAll(line, []byte("[AWS_ACCESS_KEY_REDACTED]"))
-
-	// AWS Secret Access Key
-	line = awsSecretKeyPattern.ReplaceAllFunc(line, func(match []byte) []byte {
-		parts := awsSecretKeyPattern.FindSubmatch(match)
-		if len(parts) > 2 {
-			secret := parts[2]
-			return bytes.Replace(match, secret, []byte("[AWS_SECRET_KEY_REDACTED]"), 1)
-		}
-		return match
-	})
-
-	// Bearer Token
-	line = bearerTokenPattern.ReplaceAllFunc(line, func(match []byte) []byte {
-		parts := bearerTokenPattern.FindSubmatch(match)
-		if len(parts) > 1 {
-			token := parts[1]
-			return bytes.Replace(match, token, []byte("[TOKEN_REDACTED]"), 1)
-		}
-		return match
-	})
-
-	// SQL Password
-	line = sqlPasswordPattern.ReplaceAllFunc(line, func(match []byte) []byte {
-		parts := sqlPasswordPattern.FindSubmatch(match)
-		if len(parts) > 1 {
-			pass := parts[1]
-			return bytes.Replace(match, pass, []byte("[PASSWORD_REDACTED]"), 1)
-		}
-		return match
-	})
-
+	line = redactSubmatch(line, awsSecretKeyPattern, 2, []byte("[AWS_SECRET_KEY_REDACTED]"))
+	line = redactSubmatch(line, bearerTokenPattern, 1, []byte("[TOKEN_REDACTED]"))
+	line = redactSubmatch(line, sqlPasswordPattern, 1, []byte("[PASSWORD_REDACTED]"))
 	return line
 }
 

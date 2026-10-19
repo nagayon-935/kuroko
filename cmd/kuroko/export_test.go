@@ -9,6 +9,7 @@ import (
 )
 
 func TestRunExport(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
 	path := filepath.Join(dir, "space log.log")
 	text := "# kuroko:cmd:2026-10-08T10:00:00+09:00\nRouter#show version\nversion 1\n"
@@ -38,6 +39,7 @@ func TestRunExport(t *testing.T) {
 }
 
 func TestRunExportInvalidArguments(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	for _, args := range [][]string{nil, {"a", "b"}, {"--last", "file.log"}, {"--command", "0", "a"}, {"--command", "-1", "a"}, {"--command", "not-a-number", "a"}, {"--command"}, {"-o"}, {"--unknown"}} {
 		var stdout, stderr bytes.Buffer
 		if err := runExport(args, t.TempDir(), &stdout, &stderr); err == nil {
@@ -50,6 +52,7 @@ func TestRunExportInvalidArguments(t *testing.T) {
 }
 
 func TestRunExportHelp(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	var stdout, stderr bytes.Buffer
 	if err := runExport([]string{"--help"}, t.TempDir(), &stdout, &stderr); err != nil {
 		t.Fatal(err)

@@ -3,10 +3,12 @@ package session
 import (
 	"fmt"
 	"io"
+	"net"
 	"strings"
 
 	"github.com/ryu/kuroko/internal/config"
 	"github.com/ryu/kuroko/internal/logger"
+	"github.com/ryu/kuroko/internal/textwidth"
 )
 
 // ansiColor maps color name strings to ANSI foreground escape codes.
@@ -59,34 +61,8 @@ func writeBanner(w io.Writer, args []string, cfg *config.Config) {
 }
 
 // displayWidth returns the number of terminal columns that string s occupies.
-// CJK wide characters (Japanese, Chinese, Korean etc.) count as 2 columns.
 func displayWidth(s string) int {
-	w := 0
-	for _, r := range s {
-		if isWideRune(r) {
-			w += 2
-		} else {
-			w++
-		}
-	}
-	return w
-}
-
-// isWideRune reports whether r is a CJK or other double-width Unicode character.
-func isWideRune(r rune) bool {
-	return (r >= 0x1100 && r <= 0x115F) ||
-		(r >= 0x2E80 && r <= 0x303F) ||
-		(r >= 0x3040 && r <= 0x33FF) ||
-		(r >= 0x3400 && r <= 0x4DBF) ||
-		(r >= 0x4E00 && r <= 0x9FFF) ||
-		(r >= 0xA000 && r <= 0xA4CF) ||
-		(r >= 0xAC00 && r <= 0xD7AF) ||
-		(r >= 0xF900 && r <= 0xFAFF) ||
-		(r >= 0xFE10 && r <= 0xFE6F) ||
-		(r >= 0xFF00 && r <= 0xFF60) ||
-		(r >= 0xFFE0 && r <= 0xFFE6) ||
-		(r >= 0x20000 && r <= 0x2A6DF) ||
-		(r >= 0x2A700 && r <= 0x2CEAF)
+	return textwidth.String(s)
 }
 
 // pad right-pads s with spaces so that its display width equals targetWidth.
@@ -96,6 +72,13 @@ func pad(s string, targetWidth int) string {
 		return s + strings.Repeat(" ", targetWidth-w)
 	}
 	return s
+}
+
+func formatHostLine(host string) string {
+	if isIPAddress(host) {
+		return fmt.Sprintf("  IPアドレス: %s", host)
+	}
+	return fmt.Sprintf("  ホスト    : %s", host)
 }
 
 // buildLines returns the content lines to show inside the banner box.
@@ -109,52 +92,33 @@ func buildLines(address, hostname string) []string {
 		hostInAddr = address[idx+1:]
 	}
 
-	var line1 string
-	if isIPAddress(hostInAddr) {
-		line1 = fmt.Sprintf("  IPアドレス: %s", hostInAddr)
-	} else {
-		line1 = fmt.Sprintf("  ホスト    : %s", hostInAddr)
-	}
-	lines := []string{line1}
+	lines := []string{formatHostLine(hostInAddr)}
 
 	// Second line only when ssh -G resolved the alias to a different value.
 	if hostname != "" && hostname != hostInAddr {
-		if isIPAddress(hostname) {
-			lines = append(lines, fmt.Sprintf("  IPアドレス: %s", hostname))
-		} else {
-			lines = append(lines, fmt.Sprintf("  ホスト    : %s", hostname))
-		}
+		lines = append(lines, formatHostLine(hostname))
 	}
 	return lines
 }
 
-// isIPAddress reports whether s looks like an IPv4 or IPv6 address.
+// isIPAddress reports whether s is a valid IPv4 or IPv6 address.
 func isIPAddress(s string) bool {
-	if len(s) == 0 {
-		return false
-	}
-	for _, r := range s {
-		if (r < '0' || r > '9') &&
-			(r < 'a' || r > 'f') &&
-			(r < 'A' || r > 'F') &&
-			r != '.' && r != ':' {
-			return false
+	return net.ParseIP(s) != nil
+}
+
+func maxDisplayWidth(lines []string) int {
+	w := 0
+	for _, l := range lines {
+		if dw := displayWidth(l); dw > w {
+			w = dw
 		}
 	}
-	// Must contain at least one separator to distinguish from plain hex words.
-	return strings.ContainsAny(s, ".:")
+	return w
 }
 
 func renderPlainBanner(w io.Writer, address, hostname string) {
 	lines := buildLines(address, hostname)
-
-	innerWidth := 0
-	for _, l := range lines {
-		if dw := displayWidth(l); dw > innerWidth {
-			innerWidth = dw
-		}
-	}
-	innerWidth += 2 // one space padding on each side
+	innerWidth := maxDisplayWidth(lines) + 2 // one space padding on each side
 	border := strings.Repeat("─", innerWidth)
 
 	fmt.Fprintf(w, "┌%s┐\n", border)
@@ -165,22 +129,13 @@ func renderPlainBanner(w io.Writer, address, hostname string) {
 }
 
 func renderColoredBanner(w io.Writer, address, hostname, label, color string) {
-	lines := buildLines(address, hostname)
-	labelLine := fmt.Sprintf("  [%s]", label)
-
-	innerWidth := displayWidth(labelLine)
-	for _, l := range lines {
-		if dw := displayWidth(l); dw > innerWidth {
-			innerWidth = dw
-		}
-	}
-	innerWidth += 2
+	lines := append(buildLines(address, hostname), fmt.Sprintf("  [%s]", label))
+	innerWidth := maxDisplayWidth(lines) + 2
 	border := strings.Repeat("═", innerWidth)
 
 	fmt.Fprintf(w, "%s%s╔%s╗%s\n", color, ansiBold, border, ansiReset)
 	for _, l := range lines {
 		fmt.Fprintf(w, "%s%s║ %s ║%s\n", color, ansiBold, pad(l, innerWidth-2), ansiReset)
 	}
-	fmt.Fprintf(w, "%s%s║ %s ║%s\n", color, ansiBold, pad(labelLine, innerWidth-2), ansiReset)
 	fmt.Fprintf(w, "%s%s╚%s╝%s\n", color, ansiBold, border, ansiReset)
 }
