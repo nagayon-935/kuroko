@@ -16,6 +16,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/ryu/kuroko/internal/config"
+	"github.com/ryu/kuroko/internal/console"
 	"github.com/ryu/kuroko/internal/logger"
 	"github.com/ryu/kuroko/internal/notifier"
 )
@@ -53,12 +54,12 @@ func New(cfg *config.Config, args []string) (*Session, error) {
 func (s *Session) Run() (int, error) {
 	writeBanner(os.Stderr, s.args, s.cfg)
 
-	fmt.Fprintf(os.Stderr, "\033[2m[kuroko] logging → %s\033[0m\n", s.log.Path)
+	console.Infof("logging → %s", s.log.Path)
 
 	command := strings.Join(s.args, " ")
 
 	if err := s.notifier.NotifyStart(command); err != nil {
-		fmt.Fprintf(os.Stderr, "\033[33m[kuroko] notify error: %v\033[0m\n", err)
+		console.Warnf("notify error: %v", err)
 	}
 
 	s.start = time.Now()
@@ -77,7 +78,7 @@ func (s *Session) finishLog(exitCode int) {
 	duration := time.Since(s.start)
 	closeErr := s.log.Close(exitCode)
 	if closeErr != nil {
-		fmt.Fprintf(os.Stderr, "\033[33m[kuroko] log close error: %v\033[0m\n", closeErr)
+		console.Warnf("log close error: %v", closeErr)
 	}
 
 	logPath := s.log.Path
@@ -94,18 +95,18 @@ func (s *Session) finishLog(exitCode int) {
 			if compressedPath, cerr := logger.CompressFile(s.log.Path); cerr == nil {
 				logPath = compressedPath
 			} else {
-				fmt.Fprintf(os.Stderr, "\033[33m[kuroko] compression error: %v\033[0m\n", cerr)
+				console.Warnf("compression error: %v", cerr)
 			}
 		}
 	}
 
 	if nerr := s.notifier.NotifyEnd(logPath, strings.Join(s.args, " "), exitCode, duration); nerr != nil {
-		fmt.Fprintf(os.Stderr, "\033[33m[kuroko] notify error: %v\033[0m\n", nerr)
+		console.Warnf("notify error: %v", nerr)
 	}
 
 	if s.cfg.Storage.Rotation.Enabled {
 		if rerr := logger.RotateLogs(s.cfg.LogDir, s.cfg.Storage.Rotation.MaxAgeDays, s.cfg.Storage.Rotation.MaxTotalSizeMB); rerr != nil {
-			fmt.Fprintf(os.Stderr, "\033[33m[kuroko] log rotation error: %v\033[0m\n", rerr)
+			console.Warnf("log rotation error: %v", rerr)
 		}
 	}
 	writeCompletion(os.Stderr, logPath, exitCode, duration, closeErr, s.logFailed.Load())

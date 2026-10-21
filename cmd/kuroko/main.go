@@ -7,6 +7,7 @@ import (
 
 	"github.com/ryu/kuroko/internal/completion"
 	"github.com/ryu/kuroko/internal/config"
+	"github.com/ryu/kuroko/internal/console"
 	"github.com/ryu/kuroko/internal/session"
 	"github.com/ryu/kuroko/internal/viewer"
 )
@@ -149,12 +150,12 @@ func main() {
 
 	exitCode, err := sess.Run()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "\033[31m[kuroko] error: %v\033[0m\n", err)
+		console.Errorf("error: %v", err)
 	}
 	os.Exit(exitCode)
 }
 
 func fatalf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "\033[31m[kuroko] "+format+"\033[0m\n", args...)
+	console.Errorf(format, args...)
 	os.Exit(1)
 }

@@ -1,16 +1,10 @@
 package viewer
 
 import (
-	"bytes"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
-
-	"golang.org/x/term"
 
 	"github.com/ryu/kuroko/internal/config"
 	"github.com/ryu/kuroko/internal/logger"
@@ -36,6 +30,9 @@ type LogSelector struct {
 	width       int
 	height      int
 	listScroll  int
+	// statusMessage is shown in the footer until the next key press. Errors
+	// go here rather than to stderr, which the next frame would overwrite.
+	statusMessage string
 }
 
 func RunSelector(cfg *config.Config) error {
@@ -139,139 +136,6 @@ func (s *LogSelector) moveSelection(delta int) {
 	}
 }
 
-func (s *LogSelector) loop() error {
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
-	if err != nil {
-		return err
-	}
-	defer term.Restore(int(os.Stdin.Fd()), oldState)
-
-	// Save screen, hide cursor, clear screen, and enable mouse tracking
-	_, _ = os.Stdout.Write([]byte(enterTUISeq))
-	defer func() {
-		_, _ = os.Stdout.Write([]byte(exitTUISeq))
-	}()
-
-	time.Sleep(50 * time.Millisecond)
-
-	for {
-		s.draw()
-
-		buf := make([]byte, 16)
-		n, err := os.Stdin.Read(buf)
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			continue
-		}
-
-		key := buf[:n]
-		if bytes.HasPrefix(key, []byte("\x1b[<")) {
-			m := mouseRegexp.FindSubmatch(key)
-			if len(m) == 5 {
-				btn, _ := strconv.Atoi(string(m[1]))
-				y, _ := strconv.Atoi(string(m[3]))
-
-				if btn == 64 { // Scroll Up
-					s.moveSelection(-1)
-				} else if btn == 65 { // Scroll Down
-					s.moveSelection(1)
-				} else if btn == 0 { // Left click press
-					r := y - 3
-					if idx := clickRowToIndex(r, s.listScroll, len(s.filtered)); idx >= 0 {
-						s.selected = idx
-					}
-				}
-			}
-			continue
-		}
-
-		if s.inSearch {
-			if len(key) == 1 {
-				b := key[0]
-				switch b {
-				case 13, 10: // Enter
-					s.inSearch = false
-				case 27: // Esc
-					s.inSearch = false
-				case 127, 8: // Backspace
-					if len(s.searchQuery) > 0 {
-						s.searchQuery = s.searchQuery[:len(s.searchQuery)-1]
-						s.updateFilter()
-					}
-				case 3: // Ctrl+C
-					return nil
-				default:
-					if b >= 32 && b < 127 {
-						s.searchQuery += string(b)
-						s.updateFilter()
-					}
-				}
-			}
-		} else {
-			if len(key) == 1 {
-				switch key[0] {
-				case 'q', 27: // q or Esc
-					return nil
-				case 3: // Ctrl+C
-					return nil
-				case 'j': // Down
-					s.moveSelection(1)
-				case 'k': // Up
-					s.moveSelection(-1)
-				case 's': // Toggle sort order
-					s.toggleSort()
-				case '/': // Filter mode
-					s.inSearch = true
-					s.searchQuery = ""
-					s.updateFilter()
-				case 13, 10: // Enter: View log
-					if len(s.filtered) > 0 {
-						selectedFile := s.filtered[s.selected]
-						fullPath := filepath.Join(s.logDir, selectedFile.name)
-
-						// Temporarily restore terminal state to run the sub-viewer.
-						// The sub-viewer will set up raw mode itself.
-						term.Restore(int(os.Stdin.Fd()), oldState)
-
-						// Run viewer
-						viewErr := Run(fullPath)
-
-						// Re-enter raw mode and clear/save screen
-						oldState, err = term.MakeRaw(int(os.Stdin.Fd()))
-						if err != nil {
-							return err
-						}
-						// Clear screen and redraw selector. The sub-viewer disabled
-						// mouse tracking on its own exit, so it must be re-enabled
-						// here or wheel/click navigation stays dead for the rest of
-						// the selector's lifetime.
-						_, _ = os.Stdout.Write([]byte(enterTUISeq))
-						time.Sleep(50 * time.Millisecond)
-						if viewErr != nil {
-							fmt.Fprintf(os.Stderr, "\r\n[kuroko] viewer error: %v\r\n", viewErr)
-						}
-
-						// Re-scan in case logs changed
-						if serr := s.scanLogs(); serr != nil {
-							fmt.Fprintf(os.Stderr, "\r\n[kuroko] rescan error: %v\r\n", serr)
-						}
-						s.updateFilter()
-					}
-				}
-			} else if len(key) == 3 && key[0] == 27 && key[1] == '[' {
-				switch key[2] {
-				case 'A': // Up
-					s.moveSelection(-1)
-				case 'B': // Down
-					s.moveSelection(1)
-				}
-			}
-		}
-	}
-}
-
 // bodyHeight returns the number of rows available for the log list,
 // reserving chromeHeight rows for the header, spacer, and footer.
 func (s *LogSelector) bodyHeight() int {
@@ -280,85 +144,6 @@ func (s *LogSelector) bodyHeight() int {
 		h = 1
 	}
 	return h
-}
-
-func (s *LogSelector) draw() {
-	s.width, s.height, _ = term.GetSize(int(os.Stdin.Fd()))
-	if s.width <= 0 || s.height <= 0 {
-		s.width = 80
-		s.height = 24
-	}
-
-	var out bytes.Buffer
-	out.WriteString("\x1b[H")
-
-	bodyHeight := s.bodyHeight()
-	s.listScroll = followSelection(s.selected, s.listScroll, bodyHeight)
-
-	// Draw Header
-	header := fitDisplay(fmt.Sprintf(" kuroko logs selector  [ Dir: %s ]", s.logDir), s.width)
-	out.WriteString(fmt.Sprintf("\x1b[30;47m%s\x1b[0m\x1b[K\r\n", header))
-	out.WriteString("\x1b[K\r\n")
-
-	// Render items
-	for r := 0; r < bodyHeight; r++ {
-		var line string
-		listRow := r + s.listScroll
-		if listRow < len(s.filtered) {
-			item := s.filtered[listRow]
-			indicator := "  "
-			if listRow == s.selected {
-				indicator = "> "
-			}
-
-			ts := item.started().Format("2006-01-02 15:04:05")
-			sizeStr := formatSize(item.size)
-
-			// Try to align nicely
-			if item.summary.Command != "" {
-				duration := "--"
-				if !item.summary.Started.IsZero() && !item.summary.Ended.IsZero() {
-					duration = item.summary.Duration().Round(time.Second).String()
-				}
-				line = fmt.Sprintf("%s[%s] %-8s %-7s %s  (%s) %s", indicator, ts, item.status(), duration, item.summary.Target, sizeStr, item.name)
-			} else {
-				line = fmt.Sprintf("%s[%s] (%-8s) %s", indicator, ts, sizeStr, item.name)
-				if item.readError {
-					line = fmt.Sprintf("%s[%s] unreadable (%s) %s", indicator, ts, sizeStr, item.name)
-				}
-			}
-			line = fitDisplay(line, s.width)
-
-			if listRow == s.selected {
-				line = fmt.Sprintf("\x1b[30;47m%s\x1b[0m", line)
-			}
-		} else if r == 0 && len(s.filtered) == 0 {
-			line = "No saved logs. Record a session with: kuroko <command>"
-			if len(s.items) > 0 {
-				line = "No matching logs. Press / then Enter to clear the filter."
-			}
-			line = fitDisplay(line, s.width)
-		} else {
-			line = strings.Repeat(" ", s.width)
-		}
-		out.WriteString(line + "\x1b[K\r\n")
-	}
-
-	out.WriteString(fmt.Sprintf("\x1b[%d;1H", s.height))
-
-	// Draw Footer
-	sortLabel := "new→old"
-	if !s.sortDesc {
-		sortLabel = "old→new"
-	}
-	footerText := fmt.Sprintf(" [j/k/Arrows]: Navigate  [Enter]: View  [s]: Sort: %s  [/]: Filter  [q]: Quit", sortLabel)
-	if s.inSearch {
-		footerText = fmt.Sprintf(" Filter logs (Enter to confirm): %s_", s.searchQuery)
-	}
-	footerText = fitDisplay(footerText, s.width)
-	out.WriteString(fmt.Sprintf("\x1b[30;47m%s\x1b[0m\x1b[K", footerText))
-
-	os.Stdout.Write(out.Bytes())
 }
 
 func (item selectorItem) started() time.Time {
