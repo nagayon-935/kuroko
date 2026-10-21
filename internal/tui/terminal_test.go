@@ -16,53 +16,79 @@ func withPTY(t *testing.T) *os.File {
 	if err != nil {
 		t.Skip("pty.Open() unavailable:", err)
 	}
+	t.Cleanup(func() {
+		tty.Close()
+		ptmx.Close()
+	})
 	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal("opening /dev/null:", err)
 	}
+	t.Cleanup(func() { devnull.Close() })
+
 	origStdin, origStdout := os.Stdin, os.Stdout
 	os.Stdin, os.Stdout = tty, devnull
-	t.Cleanup(func() {
-		os.Stdin, os.Stdout = origStdin, origStdout
-		devnull.Close()
-		tty.Close()
-		ptmx.Close()
-	})
+	t.Cleanup(func() { os.Stdin, os.Stdout = origStdin, origStdout })
 	return tty
+}
+
+// getState returns the current mode of tty.
+func getState(t *testing.T, tty *os.File) term.State {
+	t.Helper()
+	st, err := term.GetState(int(tty.Fd()))
+	if err != nil {
+		t.Fatalf("GetState: %v", err)
+	}
+	return *st
 }
 
 func TestTerminalLifecycleTogglesRawMode(t *testing.T) {
 	tty := withPTY(t)
-	before, err := term.GetState(int(tty.Fd()))
-	if err != nil {
-		t.Fatalf("GetState: %v", err)
-	}
+	cooked := getState(t, tty)
 
 	tm, err := Open()
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if tm.state == nil {
-		t.Fatal("Open did not save the previous terminal state")
+	raw := getState(t, tty)
+	if raw == cooked {
+		t.Fatal("Open did not switch the terminal into raw mode")
 	}
 
 	tm.Suspend()
-	if tm.state != nil {
-		t.Error("Suspend left a saved state behind")
+	if got := getState(t, tty); got != cooked {
+		t.Error("Suspend did not restore the original terminal mode")
 	}
 	tm.Suspend() // a second Suspend must be a no-op
 
 	if err := tm.Resume(); err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
+	if got := getState(t, tty); got != raw {
+		t.Error("Resume did not switch the terminal back into raw mode")
+	}
+
+	tm.Close()
+	if got := getState(t, tty); got != cooked {
+		t.Error("Close did not restore the original terminal mode")
+	}
+}
+
+func TestResumeWhileActiveKeepsOriginalState(t *testing.T) {
+	tty := withPTY(t)
+	cooked := getState(t, tty)
+
+	tm, err := Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := tm.Resume(); err != nil { // no Suspend in between
+		t.Fatalf("Resume: %v", err)
+	}
 	tm.Close()
 
-	after, err := term.GetState(int(tty.Fd()))
-	if err != nil {
-		t.Fatalf("GetState: %v", err)
-	}
-	if *before != *after {
-		t.Error("Close did not restore the original terminal mode")
+	if got := getState(t, tty); got != cooked {
+		t.Error("Close after a redundant Resume left the terminal in raw mode")
 	}
 }
 

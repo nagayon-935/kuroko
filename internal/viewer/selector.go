@@ -1,10 +1,7 @@
 package viewer
 
 import (
-	"bytes"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -12,8 +9,6 @@ import (
 	"github.com/ryu/kuroko/internal/config"
 	"github.com/ryu/kuroko/internal/logger"
 	"github.com/ryu/kuroko/internal/logstore"
-	"github.com/ryu/kuroko/internal/textwidth"
-	"github.com/ryu/kuroko/internal/tui"
 )
 
 type selectorItem struct {
@@ -35,6 +30,9 @@ type LogSelector struct {
 	width       int
 	height      int
 	listScroll  int
+	// statusMessage is shown in the footer until the next key press. Errors
+	// go here rather than to stderr, which the next frame would overwrite.
+	statusMessage string
 }
 
 func RunSelector(cfg *config.Config) error {
@@ -138,112 +136,6 @@ func (s *LogSelector) moveSelection(delta int) {
 	}
 }
 
-func (s *LogSelector) loop() error {
-	t, err := tui.Open()
-	if err != nil {
-		return err
-	}
-	defer t.Close()
-
-	for {
-		s.draw()
-
-		key, err := tui.ReadKey()
-		if err != nil {
-			return err
-		}
-		if len(key) == 0 {
-			continue
-		}
-
-		if m, ok := tui.ParseMouse(key); ok {
-			s.handleMouse(m)
-			continue
-		}
-
-		if s.inSearch {
-			query, res := tui.EditLine(s.searchQuery, key)
-			switch res {
-			case tui.EditSubmit, tui.EditCancel:
-				s.inSearch = false
-			case tui.EditInterrupt:
-				return nil
-			case tui.EditChanged:
-				s.searchQuery = query
-				s.updateFilter()
-			}
-			continue
-		}
-
-		if len(key) == 1 {
-			switch key[0] {
-			case 'q', tui.KeyEsc, tui.KeyCtrlC:
-				return nil
-			case 'j': // Down
-				s.moveSelection(1)
-			case 'k': // Up
-				s.moveSelection(-1)
-			case 's': // Toggle sort order
-				s.toggleSort()
-			case '/': // Filter mode
-				s.inSearch = true
-				s.searchQuery = ""
-				s.updateFilter()
-			case tui.KeyCR, tui.KeyLF: // View log
-				if err := s.openSelected(t); err != nil {
-					return err
-				}
-			}
-		} else if c, ok := tui.CSIKey(key); ok {
-			switch c {
-			case 'A': // Up
-				s.moveSelection(-1)
-			case 'B': // Down
-				s.moveSelection(1)
-			}
-		}
-	}
-}
-
-func (s *LogSelector) handleMouse(m tui.Mouse) {
-	switch m.Button {
-	case tui.MouseWheelUp:
-		s.moveSelection(-1)
-	case tui.MouseWheelDown:
-		s.moveSelection(1)
-	case tui.MouseLeft:
-		if idx := tui.ClickRowToIndex(m.Y-3, s.listScroll, len(s.filtered)); idx >= 0 {
-			s.selected = idx
-		}
-	}
-}
-
-// openSelected runs the log viewer for the selected entry, handing it the
-// terminal and taking it back afterwards.
-func (s *LogSelector) openSelected(t *tui.Terminal) error {
-	if len(s.filtered) == 0 {
-		return nil
-	}
-	fullPath := filepath.Join(s.logDir, s.filtered[s.selected].name)
-
-	// The sub-viewer sets up raw mode itself.
-	t.Suspend()
-	viewErr := Run(fullPath)
-	if err := t.Resume(); err != nil {
-		return err
-	}
-	if viewErr != nil {
-		fmt.Fprintf(os.Stderr, "\r\n[kuroko] viewer error: %v\r\n", viewErr)
-	}
-
-	// Re-scan in case logs changed
-	if serr := s.scanLogs(); serr != nil {
-		fmt.Fprintf(os.Stderr, "\r\n[kuroko] rescan error: %v\r\n", serr)
-	}
-	s.updateFilter()
-	return nil
-}
-
 // bodyHeight returns the number of rows available for the log list,
 // reserving chromeHeight rows for the header, spacer, and footer.
 func (s *LogSelector) bodyHeight() int {
@@ -252,81 +144,6 @@ func (s *LogSelector) bodyHeight() int {
 		h = 1
 	}
 	return h
-}
-
-func (s *LogSelector) draw() {
-	s.width, s.height = tui.Size()
-
-	var out bytes.Buffer
-	out.WriteString(tui.Home)
-
-	bodyHeight := s.bodyHeight()
-	s.listScroll = tui.FollowSelection(s.selected, s.listScroll, bodyHeight)
-
-	// Draw Header
-	header := textwidth.Fit(fmt.Sprintf(" kuroko logs selector  [ Dir: %s ]", s.logDir), s.width)
-	out.WriteString(tui.Inverse(header) + tui.ClearEOL + "\r\n")
-	out.WriteString(tui.ClearEOL + "\r\n")
-
-	// Render items
-	for r := 0; r < bodyHeight; r++ {
-		var line string
-		listRow := r + s.listScroll
-		if listRow < len(s.filtered) {
-			item := s.filtered[listRow]
-			indicator := "  "
-			if listRow == s.selected {
-				indicator = "> "
-			}
-
-			ts := item.started().Format("2006-01-02 15:04:05")
-			sizeStr := formatSize(item.size)
-
-			// Try to align nicely
-			if item.summary.Command != "" {
-				duration := "--"
-				if !item.summary.Started.IsZero() && !item.summary.Ended.IsZero() {
-					duration = item.summary.Duration().Round(time.Second).String()
-				}
-				line = fmt.Sprintf("%s[%s] %-8s %-7s %s  (%s) %s", indicator, ts, item.status(), duration, item.summary.Target, sizeStr, item.name)
-			} else {
-				line = fmt.Sprintf("%s[%s] (%-8s) %s", indicator, ts, sizeStr, item.name)
-				if item.readError {
-					line = fmt.Sprintf("%s[%s] unreadable (%s) %s", indicator, ts, sizeStr, item.name)
-				}
-			}
-			line = textwidth.Fit(line, s.width)
-
-			if listRow == s.selected {
-				line = tui.Inverse(line)
-			}
-		} else if r == 0 && len(s.filtered) == 0 {
-			line = "No saved logs. Record a session with: kuroko <command>"
-			if len(s.items) > 0 {
-				line = "No matching logs. Press / then Enter to clear the filter."
-			}
-			line = textwidth.Fit(line, s.width)
-		} else {
-			line = strings.Repeat(" ", s.width)
-		}
-		out.WriteString(line + tui.ClearEOL + "\r\n")
-	}
-
-	out.WriteString(tui.MoveToRow(s.height))
-
-	// Draw Footer
-	sortLabel := "new→old"
-	if !s.sortDesc {
-		sortLabel = "old→new"
-	}
-	footerText := fmt.Sprintf(" [j/k/Arrows]: Navigate  [Enter]: View  [s]: Sort: %s  [/]: Filter  [q]: Quit", sortLabel)
-	if s.inSearch {
-		footerText = fmt.Sprintf(" Filter logs (Enter to confirm): %s_", s.searchQuery)
-	}
-	footerText = textwidth.Fit(footerText, s.width)
-	out.WriteString(tui.Inverse(footerText) + tui.ClearEOL)
-
-	os.Stdout.Write(out.Bytes())
 }
 
 func (item selectorItem) started() time.Time {

@@ -58,8 +58,12 @@ func (t *Terminal) Suspend() {
 
 // Resume re-enters raw mode and the alternate screen after Suspend. The
 // screen sequence is always re-sent because a nested view disables mouse
-// tracking on its own exit.
+// tracking on its own exit. Resume is a no-op while already active, so the
+// saved pre-raw state is never overwritten with the raw one.
 func (t *Terminal) Resume() error {
+	if t.state != nil {
+		return nil
+	}
 	state, err := term.MakeRaw(stdinFd())
 	if err != nil {
 		return err

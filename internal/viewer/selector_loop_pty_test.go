@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ryu/kuroko/internal/tui"
 )
 
 // TestSelectorReenablesMouseAfterSubViewer proves the mouse-tracking escape
@@ -73,5 +75,64 @@ func TestSelectorReenablesMouseAfterSubViewer(t *testing.T) {
 	count := strings.Count(output, enableSeq)
 	if count < 2 {
 		t.Errorf("mouse-enable sequence %q appeared %d times; want >= 2 (once at startup, once after returning from sub-viewer)", enableSeq, count)
+	}
+}
+
+// TestSelectorReportsViewerErrorInFooter proves a sub-viewer failure is
+// shown in the footer (where the next frame cannot overwrite it) instead of
+// being written to stderr underneath the alternate screen, and that the
+// message clears on the next key press.
+func TestSelectorReportsViewerErrorInFooter(t *testing.T) {
+	ptmx, tty := openPTYOrSkip(t)
+	defer ptmx.Close()
+	defer tty.Close()
+	withPTYStdin(t, tty)
+
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "20260618_gone.log")
+	if err := os.WriteFile(logPath, []byte(testLogContent), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	s, err := newSelector(tmp)
+	if err != nil {
+		t.Fatalf("newSelector(): %v", err)
+	}
+	// Remove the file after scanning so opening it fails.
+	if err := os.Remove(logPath); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	term, err := tui.Open()
+	if err != nil {
+		t.Fatalf("tui.Open(): %v", err)
+	}
+	defer term.Close()
+
+	if err := s.openSelected(term); err != nil {
+		t.Fatalf("openSelected() = %v; want nil (viewer errors are not fatal)", err)
+	}
+	if !strings.HasPrefix(s.statusMessage, "viewer error: ") {
+		t.Fatalf("statusMessage = %q; want a viewer error", s.statusMessage)
+	}
+	if got := s.footerText(); got != " "+s.statusMessage {
+		t.Errorf("footerText() = %q; want the status message", got)
+	}
+
+	// The loop clears the message on the next key press.
+	done := make(chan error, 1)
+	go func() { done <- s.loop() }()
+	time.Sleep(80 * time.Millisecond)
+	sendKeys(ptmx, [][]byte{{'j'}, {'q'}})
+
+	select {
+	case loopErr := <-done:
+		if loopErr != nil {
+			t.Fatalf("loop() = %v", loopErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop() did not exit")
+	}
+	if s.statusMessage != "" {
+		t.Errorf("statusMessage = %q after a key press; want it cleared", s.statusMessage)
 	}
 }

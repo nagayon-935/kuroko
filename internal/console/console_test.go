@@ -14,6 +14,7 @@ func captureStderr(t *testing.T, fn func()) string {
 	if err != nil {
 		t.Fatalf("os.Pipe: %v", err)
 	}
+	defer r.Close()
 	orig := os.Stderr
 	os.Stderr = w
 	t.Cleanup(func() { os.Stderr = orig })
