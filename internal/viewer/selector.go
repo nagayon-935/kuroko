@@ -6,15 +6,14 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
-
-	"golang.org/x/term"
 
 	"github.com/ryu/kuroko/internal/config"
 	"github.com/ryu/kuroko/internal/logger"
 	"github.com/ryu/kuroko/internal/logstore"
+	"github.com/ryu/kuroko/internal/textwidth"
+	"github.com/ryu/kuroko/internal/tui"
 )
 
 type selectorItem struct {
@@ -140,136 +139,109 @@ func (s *LogSelector) moveSelection(delta int) {
 }
 
 func (s *LogSelector) loop() error {
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	t, err := tui.Open()
 	if err != nil {
 		return err
 	}
-	defer term.Restore(int(os.Stdin.Fd()), oldState)
-
-	// Save screen, hide cursor, clear screen, and enable mouse tracking
-	_, _ = os.Stdout.Write([]byte(enterTUISeq))
-	defer func() {
-		_, _ = os.Stdout.Write([]byte(exitTUISeq))
-	}()
-
-	time.Sleep(50 * time.Millisecond)
+	defer t.Close()
 
 	for {
 		s.draw()
 
-		buf := make([]byte, 16)
-		n, err := os.Stdin.Read(buf)
+		key, err := tui.ReadKey()
 		if err != nil {
 			return err
 		}
-		if n == 0 {
+		if len(key) == 0 {
 			continue
 		}
 
-		key := buf[:n]
-		if bytes.HasPrefix(key, []byte("\x1b[<")) {
-			m := mouseRegexp.FindSubmatch(key)
-			if len(m) == 5 {
-				btn, _ := strconv.Atoi(string(m[1]))
-				y, _ := strconv.Atoi(string(m[3]))
-
-				if btn == 64 { // Scroll Up
-					s.moveSelection(-1)
-				} else if btn == 65 { // Scroll Down
-					s.moveSelection(1)
-				} else if btn == 0 { // Left click press
-					r := y - 3
-					if idx := clickRowToIndex(r, s.listScroll, len(s.filtered)); idx >= 0 {
-						s.selected = idx
-					}
-				}
-			}
+		if m, ok := tui.ParseMouse(key); ok {
+			s.handleMouse(m)
 			continue
 		}
 
 		if s.inSearch {
-			if len(key) == 1 {
-				b := key[0]
-				switch b {
-				case 13, 10: // Enter
-					s.inSearch = false
-				case 27: // Esc
-					s.inSearch = false
-				case 127, 8: // Backspace
-					if len(s.searchQuery) > 0 {
-						s.searchQuery = s.searchQuery[:len(s.searchQuery)-1]
-						s.updateFilter()
-					}
-				case 3: // Ctrl+C
-					return nil
-				default:
-					if b >= 32 && b < 127 {
-						s.searchQuery += string(b)
-						s.updateFilter()
-					}
+			query, res := tui.EditLine(s.searchQuery, key)
+			switch res {
+			case tui.EditSubmit, tui.EditCancel:
+				s.inSearch = false
+			case tui.EditInterrupt:
+				return nil
+			case tui.EditChanged:
+				s.searchQuery = query
+				s.updateFilter()
+			}
+			continue
+		}
+
+		if len(key) == 1 {
+			switch key[0] {
+			case 'q', tui.KeyEsc, tui.KeyCtrlC:
+				return nil
+			case 'j': // Down
+				s.moveSelection(1)
+			case 'k': // Up
+				s.moveSelection(-1)
+			case 's': // Toggle sort order
+				s.toggleSort()
+			case '/': // Filter mode
+				s.inSearch = true
+				s.searchQuery = ""
+				s.updateFilter()
+			case tui.KeyCR, tui.KeyLF: // View log
+				if err := s.openSelected(t); err != nil {
+					return err
 				}
 			}
-		} else {
-			if len(key) == 1 {
-				switch key[0] {
-				case 'q', 27: // q or Esc
-					return nil
-				case 3: // Ctrl+C
-					return nil
-				case 'j': // Down
-					s.moveSelection(1)
-				case 'k': // Up
-					s.moveSelection(-1)
-				case 's': // Toggle sort order
-					s.toggleSort()
-				case '/': // Filter mode
-					s.inSearch = true
-					s.searchQuery = ""
-					s.updateFilter()
-				case 13, 10: // Enter: View log
-					if len(s.filtered) > 0 {
-						selectedFile := s.filtered[s.selected]
-						fullPath := filepath.Join(s.logDir, selectedFile.name)
-
-						// Temporarily restore terminal state to run the sub-viewer.
-						// The sub-viewer will set up raw mode itself.
-						term.Restore(int(os.Stdin.Fd()), oldState)
-
-						// Run viewer
-						viewErr := Run(fullPath)
-
-						// Re-enter raw mode and clear/save screen
-						oldState, err = term.MakeRaw(int(os.Stdin.Fd()))
-						if err != nil {
-							return err
-						}
-						// Clear screen and redraw selector. The sub-viewer disabled
-						// mouse tracking on its own exit, so it must be re-enabled
-						// here or wheel/click navigation stays dead for the rest of
-						// the selector's lifetime.
-						_, _ = os.Stdout.Write([]byte(enterTUISeq))
-						time.Sleep(50 * time.Millisecond)
-						if viewErr != nil {
-							fmt.Fprintf(os.Stderr, "\r\n[kuroko] viewer error: %v\r\n", viewErr)
-						}
-
-						// Re-scan in case logs changed
-						if serr := s.scanLogs(); serr != nil {
-							fmt.Fprintf(os.Stderr, "\r\n[kuroko] rescan error: %v\r\n", serr)
-						}
-						s.updateFilter()
-					}
-				}
-			} else if len(key) == 3 && key[0] == 27 && key[1] == '[' {
-				switch key[2] {
-				case 'A': // Up
-					s.moveSelection(-1)
-				case 'B': // Down
-					s.moveSelection(1)
-				}
+		} else if c, ok := tui.CSIKey(key); ok {
+			switch c {
+			case 'A': // Up
+				s.moveSelection(-1)
+			case 'B': // Down
+				s.moveSelection(1)
 			}
 		}
 	}
+}
+
+func (s *LogSelector) handleMouse(m tui.Mouse) {
+	switch m.Button {
+	case tui.MouseWheelUp:
+		s.moveSelection(-1)
+	case tui.MouseWheelDown:
+		s.moveSelection(1)
+	case tui.MouseLeft:
+		if idx := tui.ClickRowToIndex(m.Y-3, s.listScroll, len(s.filtered)); idx >= 0 {
+			s.selected = idx
+		}
+	}
+}
+
+// openSelected runs the log viewer for the selected entry, handing it the
+// terminal and taking it back afterwards.
+func (s *LogSelector) openSelected(t *tui.Terminal) error {
+	if len(s.filtered) == 0 {
+		return nil
+	}
+	fullPath := filepath.Join(s.logDir, s.filtered[s.selected].name)
+
+	// The sub-viewer sets up raw mode itself.
+	t.Suspend()
+	viewErr := Run(fullPath)
+	if err := t.Resume(); err != nil {
+		return err
+	}
+	if viewErr != nil {
+		fmt.Fprintf(os.Stderr, "\r\n[kuroko] viewer error: %v\r\n", viewErr)
+	}
+
+	// Re-scan in case logs changed
+	if serr := s.scanLogs(); serr != nil {
+		fmt.Fprintf(os.Stderr, "\r\n[kuroko] rescan error: %v\r\n", serr)
+	}
+	s.updateFilter()
+	return nil
 }
 
 // bodyHeight returns the number of rows available for the log list,
@@ -283,22 +255,18 @@ func (s *LogSelector) bodyHeight() int {
 }
 
 func (s *LogSelector) draw() {
-	s.width, s.height, _ = term.GetSize(int(os.Stdin.Fd()))
-	if s.width <= 0 || s.height <= 0 {
-		s.width = 80
-		s.height = 24
-	}
+	s.width, s.height = tui.Size()
 
 	var out bytes.Buffer
-	out.WriteString("\x1b[H")
+	out.WriteString(tui.Home)
 
 	bodyHeight := s.bodyHeight()
-	s.listScroll = followSelection(s.selected, s.listScroll, bodyHeight)
+	s.listScroll = tui.FollowSelection(s.selected, s.listScroll, bodyHeight)
 
 	// Draw Header
-	header := fitDisplay(fmt.Sprintf(" kuroko logs selector  [ Dir: %s ]", s.logDir), s.width)
-	out.WriteString(fmt.Sprintf("\x1b[30;47m%s\x1b[0m\x1b[K\r\n", header))
-	out.WriteString("\x1b[K\r\n")
+	header := textwidth.Fit(fmt.Sprintf(" kuroko logs selector  [ Dir: %s ]", s.logDir), s.width)
+	out.WriteString(tui.Inverse(header) + tui.ClearEOL + "\r\n")
+	out.WriteString(tui.ClearEOL + "\r\n")
 
 	// Render items
 	for r := 0; r < bodyHeight; r++ {
@@ -327,24 +295,24 @@ func (s *LogSelector) draw() {
 					line = fmt.Sprintf("%s[%s] unreadable (%s) %s", indicator, ts, sizeStr, item.name)
 				}
 			}
-			line = fitDisplay(line, s.width)
+			line = textwidth.Fit(line, s.width)
 
 			if listRow == s.selected {
-				line = fmt.Sprintf("\x1b[30;47m%s\x1b[0m", line)
+				line = tui.Inverse(line)
 			}
 		} else if r == 0 && len(s.filtered) == 0 {
 			line = "No saved logs. Record a session with: kuroko <command>"
 			if len(s.items) > 0 {
 				line = "No matching logs. Press / then Enter to clear the filter."
 			}
-			line = fitDisplay(line, s.width)
+			line = textwidth.Fit(line, s.width)
 		} else {
 			line = strings.Repeat(" ", s.width)
 		}
-		out.WriteString(line + "\x1b[K\r\n")
+		out.WriteString(line + tui.ClearEOL + "\r\n")
 	}
 
-	out.WriteString(fmt.Sprintf("\x1b[%d;1H", s.height))
+	out.WriteString(tui.MoveToRow(s.height))
 
 	// Draw Footer
 	sortLabel := "new→old"
@@ -355,8 +323,8 @@ func (s *LogSelector) draw() {
 	if s.inSearch {
 		footerText = fmt.Sprintf(" Filter logs (Enter to confirm): %s_", s.searchQuery)
 	}
-	footerText = fitDisplay(footerText, s.width)
-	out.WriteString(fmt.Sprintf("\x1b[30;47m%s\x1b[0m\x1b[K", footerText))
+	footerText = textwidth.Fit(footerText, s.width)
+	out.WriteString(tui.Inverse(footerText) + tui.ClearEOL)
 
 	os.Stdout.Write(out.Bytes())
 }

@@ -1,4 +1,4 @@
-package viewer
+package tui
 
 import "testing"
 
@@ -19,9 +19,9 @@ func TestFollowSelection(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := followSelection(tt.selected, tt.scroll, tt.bodyHeight)
+			got := FollowSelection(tt.selected, tt.scroll, tt.bodyHeight)
 			if got != tt.want {
-				t.Errorf("followSelection(%d, %d, %d) = %d; want %d", tt.selected, tt.scroll, tt.bodyHeight, got, tt.want)
+				t.Errorf("FollowSelection(%d, %d, %d) = %d; want %d", tt.selected, tt.scroll, tt.bodyHeight, got, tt.want)
 			}
 		})
 	}
@@ -43,9 +43,9 @@ func TestClickRowToIndex(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := clickRowToIndex(tt.r, tt.scroll, tt.count)
+			got := ClickRowToIndex(tt.r, tt.scroll, tt.count)
 			if got != tt.want {
-				t.Errorf("clickRowToIndex(%d, %d, %d) = %d; want %d", tt.r, tt.scroll, tt.count, got, tt.want)
+				t.Errorf("ClickRowToIndex(%d, %d, %d) = %d; want %d", tt.r, tt.scroll, tt.count, got, tt.want)
 			}
 		})
 	}

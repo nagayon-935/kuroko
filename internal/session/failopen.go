@@ -1,11 +1,11 @@
 package session
 
 import (
-	"fmt"
 	"io"
-	"os"
 	"sync"
 	"sync/atomic"
+
+	"github.com/ryu/kuroko/internal/console"
 )
 
 // failOpenWriter wraps an io.Writer so that a write error (or short write)
@@ -39,7 +39,7 @@ func (f *failOpenWriter) Write(p []byte) (int, error) {
 				if err == nil {
 					err = io.ErrShortWrite
 				}
-				fmt.Fprintf(os.Stderr, "\033[33m[kuroko] log write error: %v (logging disabled for remainder of session)\033[0m\n", err)
+				console.Warnf("log write error: %v (logging disabled for remainder of session)", err)
 			})
 		}
 	}

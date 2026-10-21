@@ -6,74 +6,19 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
-	"golang.org/x/term"
-
 	"github.com/ryu/kuroko/internal/logger"
 	"github.com/ryu/kuroko/internal/logstore"
 	"github.com/ryu/kuroko/internal/textwidth"
+	"github.com/ryu/kuroko/internal/tui"
 )
 
 // chromeHeight is the number of terminal rows consumed by the header, the
 // blank spacer line, and the footer, leaving the remainder for the body.
 const chromeHeight = 3
-
-const (
-	// Save screen, hide cursor, clear screen, and enable mouse tracking (SGR 1006).
-	enterTUISeq = "\x1b[?1049h\x1b[?25l\x1b[2J\x1b[?1000h\x1b[?1006h"
-	// Disable mouse tracking, show cursor, and restore alternate screen.
-	exitTUISeq = "\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l"
-)
-
-// truncateDisplay truncates s to at most width terminal columns, appending
-// "..." when truncated. Width is measured with textwidth.String rather than
-// rune count, since East Asian Wide/Fullwidth characters (e.g. Japanese
-// hostnames or device output) occupy two columns each; truncating by rune
-// count alone drifts the pane's right border out of alignment. Truncation
-// always stops on a rune boundary, so the result is valid UTF-8.
-func truncateDisplay(s string, width int) string {
-	if width <= 0 {
-		return ""
-	}
-	if textwidth.String(s) <= width {
-		return s
-	}
-	budget := width
-	suffix := ""
-	if width > 3 {
-		budget = width - 3
-		suffix = "..."
-	}
-	var b strings.Builder
-	col := 0
-	for _, r := range s {
-		w := textwidth.Rune(r)
-		if col+w > budget {
-			break
-		}
-		b.WriteRune(r)
-		col += w
-	}
-	return b.String() + suffix
-}
-
-// fitDisplay truncates or right-pads s with spaces so its terminal display
-// width matches width columns.
-func fitDisplay(s string, width int) string {
-	if width <= 0 {
-		return ""
-	}
-	if n := textwidth.String(s); n > width {
-		return truncateDisplay(s, width)
-	} else {
-		return s + strings.Repeat(" ", width-n)
-	}
-}
 
 type CommandMetadata struct {
 	Timestamp    string `json:"timestamp"`
@@ -95,8 +40,6 @@ const (
 	SearchCommands SearchMode = iota
 	SearchOutput
 )
-
-var mouseRegexp = regexp.MustCompile(`^\x1b\[<(\d+);(\d+);(\d+)([Mm])`)
 
 type Viewer struct {
 	statusMessage      string
@@ -363,180 +306,165 @@ func (v *Viewer) onSearchQueryChanged() {
 }
 
 func (v *Viewer) loop() error {
-	// Enter raw mode
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	t, err := tui.Open()
 	if err != nil {
 		return err
 	}
-	defer term.Restore(int(os.Stdin.Fd()), oldState)
-
-	// Save screen, hide cursor, clear screen, and enable mouse tracking (SGR 1006)
-	_, _ = os.Stdout.Write([]byte(enterTUISeq))
-	defer func() {
-		_, _ = os.Stdout.Write([]byte(exitTUISeq))
-	}()
-
-	// Sleep slightly to allow the terminal to process the buffer switch and clear screen
-	time.Sleep(50 * time.Millisecond)
+	defer t.Close()
 
 	for {
 		v.draw()
 
-		// Read key input
-		buf := make([]byte, 16)
-		n, err := os.Stdin.Read(buf)
+		key, err := tui.ReadKey()
 		if err != nil {
 			return err
 		}
-		if n == 0 {
+		if len(key) == 0 {
 			continue
 		}
 
-		key := buf[:n]
 		v.statusMessage = ""
-		if bytes.HasPrefix(key, []byte("\x1b[<")) {
-			m := mouseRegexp.FindSubmatch(key)
-			if len(m) == 5 {
-				btn, _ := strconv.Atoi(string(m[1]))
-				x, _ := strconv.Atoi(string(m[2]))
-				y, _ := strconv.Atoi(string(m[3]))
-
-				leftWidth, _ := paneWidths(v.width)
-
-				if btn == 64 { // Scroll Up
-					if x <= leftWidth {
-						v.moveTimeline(-1)
-					} else if x > leftWidth+1 {
-						v.scrollOutput(-3)
-					}
-				} else if btn == 65 { // Scroll Down
-					if x <= leftWidth {
-						v.moveTimeline(1)
-					} else if x > leftWidth+1 {
-						v.scrollOutput(3)
-					}
-				} else if btn == 0 { // Left click press
-					r := y - 3
-					if x <= leftWidth {
-						v.activePane = PaneTimeline
-						if idx := clickRowToIndex(r, v.timelineScroll, len(v.filteredIdx)); idx >= 0 {
-							v.selected = idx
-							v.updateOutput()
-						}
-					} else if x > leftWidth+1 {
-						v.activePane = PaneOutput
-					}
-				}
-			}
+		if m, ok := tui.ParseMouse(key); ok {
+			v.handleMouse(m)
 			continue
 		}
 
 		if v.inSearch {
-			if len(key) == 1 {
-				b := key[0]
-				switch b {
-				case 13, 10: // Enter
-					v.inSearch = false
-					if v.searchMode == SearchOutput {
-						v.outputQuery = v.searchQuery
-						v.updateMatches()
-						if len(v.matchLines) > 0 {
-							v.scrollToLine(v.matchLines[v.activeMatch], v.bodyHeight())
-						}
-					}
-				case 27: // Esc
-					v.inSearch = false
-				case 127, 8: // Backspace
-					if len(v.searchQuery) > 0 {
-						v.searchQuery = v.searchQuery[:len(v.searchQuery)-1]
-						v.onSearchQueryChanged()
-					}
-				case 3: // Ctrl+C
-					return nil
-				default:
-					if b >= 32 && b < 127 {
-						v.searchQuery += string(b)
-						v.onSearchQueryChanged()
+			query, res := tui.EditLine(v.searchQuery, key)
+			switch res {
+			case tui.EditSubmit:
+				v.inSearch = false
+				if v.searchMode == SearchOutput {
+					v.outputQuery = v.searchQuery
+					v.updateMatches()
+					if len(v.matchLines) > 0 {
+						v.scrollToLine(v.matchLines[v.activeMatch], v.bodyHeight())
 					}
 				}
+			case tui.EditCancel:
+				v.inSearch = false
+			case tui.EditInterrupt:
+				return nil
+			case tui.EditChanged:
+				v.searchQuery = query
+				v.onSearchQueryChanged()
 			}
-		} else {
-			// Normal mode navigation
-			if len(key) == 1 {
-				switch key[0] {
-				case 'e': // Export the selected command or entire session
-					v.exportSelection()
-				case 'q', 27: // q or Esc
-					return nil
-				case 3: // Ctrl+C
-					return nil
-				case 9: // Tab
-					if v.activePane == PaneTimeline {
-						v.activePane = PaneOutput
-					} else {
-						v.activePane = PaneTimeline
-					}
-				case 'h':
-					v.activePane = PaneTimeline
-				case 'l':
-					v.activePane = PaneOutput
-				case 'j': // down
-					v.stepActivePane(1, 3)
-				case 'k': // up
-					v.stepActivePane(-1, -3)
-				case 4: // Ctrl+D
-					if v.activePane == PaneOutput {
-						v.scrollOutput(v.bodyHeight())
-					}
-				case 21: // Ctrl+U
-					if v.activePane == PaneOutput {
-						v.scrollOutput(-v.bodyHeight())
-					}
-				case '/': // Search Commands mode
-					v.inSearch = true
-					v.searchMode = SearchCommands
-					v.searchQuery = ""
-					v.updateFilter()
-					v.updateOutput()
-				case 'f': // Search Output mode
-					v.inSearch = true
-					v.searchMode = SearchOutput
-					v.searchQuery = ""
-				case 'n': // Next output search match
-					if len(v.matchLines) > 0 && v.activeMatch != -1 {
-						v.activeMatch = (v.activeMatch + 1) % len(v.matchLines)
-						v.scrollToLine(v.matchLines[v.activeMatch], v.bodyHeight())
-					}
-				case 'N': // Previous output search match
-					if len(v.matchLines) > 0 && v.activeMatch != -1 {
-						v.activeMatch = (v.activeMatch - 1 + len(v.matchLines)) % len(v.matchLines)
-						v.scrollToLine(v.matchLines[v.activeMatch], v.bodyHeight())
-					}
-				}
-			} else if len(key) == 3 && key[0] == 27 && key[1] == '[' {
-				// Arrow keys: Escape sequences (e.g. Esc [ A)
-				switch key[2] {
-				case 'A': // Up arrow
-					v.stepActivePane(-1, -3)
-				case 'B': // Down arrow
-					v.stepActivePane(1, 3)
-				case 'C': // Right arrow
-					v.activePane = PaneOutput
-				case 'D': // Left arrow
-					v.activePane = PaneTimeline
-				}
-			} else if len(key) == 4 && key[0] == 27 && key[1] == '[' && key[3] == '~' {
-				// PageUp / PageDown keys: e.g. Esc [ 5 ~ (PageUp), Esc [ 6 ~ (PageDown)
-				if v.activePane == PaneOutput {
-					if key[2] == '5' { // PageUp
-						v.scrollOutput(-v.bodyHeight())
-					} else if key[2] == '6' { // PageDown
-						v.scrollOutput(v.bodyHeight())
-					}
+			continue
+		}
+
+		// Normal mode navigation
+		if len(key) == 1 {
+			if quit := v.handleKey(key[0]); quit {
+				return nil
+			}
+		} else if c, ok := tui.CSIKey(key); ok {
+			// Arrow keys: Escape sequences (e.g. Esc [ A)
+			switch c {
+			case 'A': // Up arrow
+				v.stepActivePane(-1, -3)
+			case 'B': // Down arrow
+				v.stepActivePane(1, 3)
+			case 'C': // Right arrow
+				v.activePane = PaneOutput
+			case 'D': // Left arrow
+				v.activePane = PaneTimeline
+			}
+		} else if c, ok := tui.TildeKey(key); ok {
+			// PageUp / PageDown keys: Esc [ 5 ~ (PageUp), Esc [ 6 ~ (PageDown)
+			if v.activePane == PaneOutput {
+				if c == '5' {
+					v.scrollOutput(-v.bodyHeight())
+				} else if c == '6' {
+					v.scrollOutput(v.bodyHeight())
 				}
 			}
 		}
 	}
+}
+
+func (v *Viewer) handleMouse(m tui.Mouse) {
+	leftWidth, _ := paneWidths(v.width)
+	inTimeline := m.X <= leftWidth
+	inOutput := m.X > leftWidth+1
+
+	switch m.Button {
+	case tui.MouseWheelUp:
+		if inTimeline {
+			v.moveTimeline(-1)
+		} else if inOutput {
+			v.scrollOutput(-3)
+		}
+	case tui.MouseWheelDown:
+		if inTimeline {
+			v.moveTimeline(1)
+		} else if inOutput {
+			v.scrollOutput(3)
+		}
+	case tui.MouseLeft:
+		if inTimeline {
+			v.activePane = PaneTimeline
+			if idx := tui.ClickRowToIndex(m.Y-3, v.timelineScroll, len(v.filteredIdx)); idx >= 0 {
+				v.selected = idx
+				v.updateOutput()
+			}
+		} else if inOutput {
+			v.activePane = PaneOutput
+		}
+	}
+}
+
+// handleKey applies a single-byte key in normal mode and reports whether
+// the viewer should quit.
+func (v *Viewer) handleKey(b byte) (quit bool) {
+	switch b {
+	case 'e': // Export the selected command or entire session
+		v.exportSelection()
+	case 'q', tui.KeyEsc, tui.KeyCtrlC:
+		return true
+	case tui.KeyTab:
+		if v.activePane == PaneTimeline {
+			v.activePane = PaneOutput
+		} else {
+			v.activePane = PaneTimeline
+		}
+	case 'h':
+		v.activePane = PaneTimeline
+	case 'l':
+		v.activePane = PaneOutput
+	case 'j': // down
+		v.stepActivePane(1, 3)
+	case 'k': // up
+		v.stepActivePane(-1, -3)
+	case tui.KeyCtrlD:
+		if v.activePane == PaneOutput {
+			v.scrollOutput(v.bodyHeight())
+		}
+	case tui.KeyCtrlU:
+		if v.activePane == PaneOutput {
+			v.scrollOutput(-v.bodyHeight())
+		}
+	case '/': // Search Commands mode
+		v.inSearch = true
+		v.searchMode = SearchCommands
+		v.searchQuery = ""
+		v.updateFilter()
+		v.updateOutput()
+	case 'f': // Search Output mode
+		v.inSearch = true
+		v.searchMode = SearchOutput
+		v.searchQuery = ""
+	case 'n': // Next output search match
+		if len(v.matchLines) > 0 && v.activeMatch != -1 {
+			v.activeMatch = (v.activeMatch + 1) % len(v.matchLines)
+			v.scrollToLine(v.matchLines[v.activeMatch], v.bodyHeight())
+		}
+	case 'N': // Previous output search match
+		if len(v.matchLines) > 0 && v.activeMatch != -1 {
+			v.activeMatch = (v.activeMatch - 1 + len(v.matchLines)) % len(v.matchLines)
+			v.scrollToLine(v.matchLines[v.activeMatch], v.bodyHeight())
+		}
+	}
+	return false
 }
 
 // Keep both panes usable on narrow terminals; wide terminals retain the
@@ -554,32 +482,28 @@ func paneWidths(width int) (left, right int) {
 }
 
 func (v *Viewer) draw() {
-	v.width, v.height, _ = term.GetSize(int(os.Stdin.Fd()))
-	if v.width <= 0 || v.height <= 0 {
-		v.width = 80
-		v.height = 24
-	}
+	v.width, v.height = tui.Size()
 
 	// Move cursor to home (don't clear screen to prevent flickering)
 	var out bytes.Buffer
-	out.WriteString("\x1b[H")
+	out.WriteString(tui.Home)
 
 	// Calculate layouts
 	// Left pane: 35% of width, min 30 chars
 	leftWidth, rightWidth := paneWidths(v.width)
 	bodyHeight := v.bodyHeight()
-	v.timelineScroll = followSelection(v.selected, v.timelineScroll, bodyHeight)
+	v.timelineScroll = tui.FollowSelection(v.selected, v.timelineScroll, bodyHeight)
 
 	// Draw Header with active pane indicator
 	paneStr := " PANE: [Timeline]  Output"
 	if v.activePane == PaneOutput {
 		paneStr = " PANE:  Timeline  [Output]"
 	}
-	header := fitDisplay(fmt.Sprintf(" kuroko log viewer  [ File: %s ]%s", filepath.Base(v.logPath), paneStr), v.width)
-	out.WriteString(fmt.Sprintf("\x1b[30;47m%s\x1b[0m\x1b[K\r\n", header))
+	header := textwidth.Fit(fmt.Sprintf(" kuroko log viewer  [ File: %s ]%s", filepath.Base(v.logPath), paneStr), v.width)
+	out.WriteString(tui.Inverse(header) + tui.ClearEOL + "\r\n")
 
 	// Draw Empty line between header and body
-	out.WriteString("\x1b[K\r\n")
+	out.WriteString(tui.ClearEOL + "\r\n")
 
 	// Draw Body split screen
 	for r := 0; r < bodyHeight; r++ {
@@ -606,11 +530,11 @@ func (v *Viewer) draw() {
 			} else {
 				leftText = fmt.Sprintf("%s[%s] %d. %s", indicator, ts, cmdIdx, cmd.Command)
 			}
-			leftText = fitDisplay(leftText, leftWidth)
+			leftText = textwidth.Fit(leftText, leftWidth)
 
 			if timelineRow == v.selected {
 				// Highlight selected line in timeline
-				leftText = fmt.Sprintf("\x1b[30;47m%s\x1b[0m", leftText)
+				leftText = tui.Inverse(leftText)
 			}
 		} else {
 			leftText = strings.Repeat(" ", leftWidth)
@@ -619,7 +543,7 @@ func (v *Viewer) draw() {
 		// 2. Middle Border (Highlight if Output pane is active)
 		border := "|"
 		if v.activePane == PaneOutput {
-			border = "\x1b[33m|\x1b[0m"
+			border = tui.Yellow("|")
 		}
 
 		// 3. Right pane (Output with scroll and query highlight)
@@ -638,7 +562,7 @@ func (v *Viewer) draw() {
 				}
 			}
 
-			truncated := fitDisplay(line, rightWidth)
+			truncated := textwidth.Fit(line, rightWidth)
 			if isMatch {
 				isActive := (matchIdx == v.activeMatch)
 				rightText = highlightQuery(truncated, v.outputQuery, isActive)
@@ -649,11 +573,11 @@ func (v *Viewer) draw() {
 			rightText = strings.Repeat(" ", rightWidth)
 		}
 
-		out.WriteString(fmt.Sprintf("%s%s%s\x1b[K\r\n", leftText, border, rightText))
+		out.WriteString(leftText + border + rightText + tui.ClearEOL + "\r\n")
 	}
 
 	// Move cursor explicitly to the bottom line for footer to prevent screen scrolling
-	out.WriteString(fmt.Sprintf("\x1b[%d;1H", v.height))
+	out.WriteString(tui.MoveToRow(v.height))
 
 	// Draw Footer
 	var footerText string
@@ -677,8 +601,8 @@ func (v *Viewer) draw() {
 	if v.statusMessage != "" {
 		footerText = " " + v.statusMessage
 	}
-	footerText = fitDisplay(footerText, v.width)
-	out.WriteString(fmt.Sprintf("\x1b[30;47m%s\x1b[0m\x1b[K", footerText))
+	footerText = textwidth.Fit(footerText, v.width)
+	out.WriteString(tui.Inverse(footerText) + tui.ClearEOL)
 
 	os.Stdout.Write(out.Bytes())
 }
