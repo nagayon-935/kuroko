@@ -53,13 +53,13 @@ func (r *sshConfigReader) markSeen(path string) bool {
 	if r.seenFiles[clean] {
 		return false
 	}
-	r.seenFiles[clean] = true
 	if resolved, err := filepath.EvalSymlinks(clean); err == nil {
 		if r.seenFiles[resolved] {
 			return false
 		}
 		r.seenFiles[resolved] = true
 	}
+	r.seenFiles[clean] = true
 	return true
 }
 

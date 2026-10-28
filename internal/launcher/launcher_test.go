@@ -22,7 +22,10 @@ func writeConfig(t *testing.T, home, name, content string) {
 }
 
 func TestSSHHosts(t *testing.T) {
-	home := t.TempDir()
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	writeConfig(t, home, "config", `# ignored
 Host = router "Switch" router *.example !excluded ?test zebra Alpha alpha
   HostName not-an-alias
