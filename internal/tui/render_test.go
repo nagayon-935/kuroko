@@ -50,3 +50,34 @@ func TestClickRowToIndex(t *testing.T) {
 		})
 	}
 }
+
+func TestPlainNeutralizesControlAndFormatRunes(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"printable ascii and cjk unchanged", "host-01 接続先", "host-01 接続先"},
+		{"ansi escape and tabs replaced", "a\x1b[2Jb\tc\r\nd\x7fe", "a [2Jb c  d e"},
+		{"c1 control and bidi override replaced", "admin\u0085\u202ehost", "admin  host"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := Plain(tt.input); got != tt.want {
+				t.Errorf("Plain(%q) = %q; want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRenderHelpers(t *testing.T) {
+	if got, want := Inverse("bar"), "\x1b[30;47mbar\x1b[0m"; got != want {
+		t.Errorf("Inverse = %q; want %q", got, want)
+	}
+	if got, want := Yellow("|"), "\x1b[33m|\x1b[0m"; got != want {
+		t.Errorf("Yellow = %q; want %q", got, want)
+	}
+	if got, want := MoveToRow(24), "\x1b[24;1H"; got != want {
+		t.Errorf("MoveToRow = %q; want %q", got, want)
+	}
+}

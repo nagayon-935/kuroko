@@ -20,7 +20,7 @@ func (s *LogSelector) draw() {
 	bodyHeight := s.bodyHeight()
 	s.listScroll = tui.FollowSelection(s.selected, s.listScroll, bodyHeight)
 
-	header := fmt.Sprintf(" kuroko logs selector  [ Dir: %s ]", s.logDir)
+	header := fmt.Sprintf(" kuroko logs selector  [ Dir: %s ]", tui.Plain(s.logDir))
 	out.WriteString(tui.Inverse(textwidth.Fit(header, s.width)) + tui.ClearEOL + "\r\n")
 	out.WriteString(tui.ClearEOL + "\r\n")
 
@@ -56,6 +56,7 @@ func (s *LogSelector) rowText(r int) string {
 	}
 	ts := item.started().Format("2006-01-02 15:04:05")
 	sizeStr := formatSize(item.size)
+	name := tui.Plain(item.name)
 
 	var line string
 	switch {
@@ -64,11 +65,11 @@ func (s *LogSelector) rowText(r int) string {
 		if !item.summary.Started.IsZero() && !item.summary.Ended.IsZero() {
 			duration = item.summary.Duration().Round(time.Second).String()
 		}
-		line = fmt.Sprintf("%s[%s] %-8s %-7s %s  (%s) %s", indicator, ts, item.status(), duration, item.summary.Target, sizeStr, item.name)
+		line = fmt.Sprintf("%s[%s] %-8s %-7s %s  (%s) %s", indicator, ts, item.status(), duration, tui.Plain(item.summary.Target), sizeStr, name)
 	case item.readError:
-		line = fmt.Sprintf("%s[%s] unreadable (%s) %s", indicator, ts, sizeStr, item.name)
+		line = fmt.Sprintf("%s[%s] unreadable (%s) %s", indicator, ts, sizeStr, name)
 	default:
-		line = fmt.Sprintf("%s[%s] (%-8s) %s", indicator, ts, sizeStr, item.name)
+		line = fmt.Sprintf("%s[%s] (%-8s) %s", indicator, ts, sizeStr, name)
 	}
 	line = textwidth.Fit(line, s.width)
 
@@ -82,10 +83,10 @@ func (s *LogSelector) rowText(r int) string {
 // transient status message.
 func (s *LogSelector) footerText() string {
 	if s.statusMessage != "" {
-		return " " + s.statusMessage
+		return " " + tui.Plain(s.statusMessage)
 	}
 	if s.inSearch {
-		return fmt.Sprintf(" Filter logs (Enter to confirm): %s_", s.searchQuery)
+		return fmt.Sprintf(" Filter logs (Enter to confirm): %s_", tui.Plain(s.searchQuery))
 	}
 	sortLabel := "new→old"
 	if !s.sortDesc {

@@ -9,12 +9,14 @@ import (
 
 // Control bytes delivered by a terminal in raw mode.
 const (
+	KeyCtrlB     = 2
 	KeyCtrlC     = 3
 	KeyCtrlD     = 4
 	KeyBackspace = 8
 	KeyTab       = 9
 	KeyLF        = 10
 	KeyCR        = 13
+	KeyCtrlN     = 14
 	KeyCtrlU     = 21
 	KeyEsc       = 27
 	KeyDelete    = 127

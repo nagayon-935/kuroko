@@ -634,3 +634,35 @@ func TestViewerDrawHeaderAndFooterAlignWithWideCharacters(t *testing.T) {
 		}
 	}
 }
+
+func TestViewerAndSelectorSanitizeControlSequences(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "test.log")
+	content := "# kuroko session log\n# Started : 2026-06-18T12:00:00+09:00\n# Command : ssh \x1b[2Jevil\u202ehost\n# Target  : \x1b[2Jevil\u202ehost\n# ---\n\n# kuroko:cmd:2026-06-18T12:00:01+09:00\nuser@host:~$ echo \x1b[2Jinjected\n\x1b[2Jinjected\u202eoutput\n"
+	if err := os.WriteFile(logPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	v, err := newViewer(logPath)
+	if err != nil {
+		t.Fatalf("newViewer(): %v", err)
+	}
+	v.statusMessage = "bad \x1b[2J status"
+	restore := captureStdout(t)
+	v.draw()
+	vOut := restore()
+	if strings.Contains(vOut, "\x1b[2J") || strings.ContainsRune(vOut, '\u202e') {
+		t.Fatalf("viewer emitted unsafe sequence: %q", vOut)
+	}
+
+	s, err := newSelector(tmp)
+	if err != nil {
+		t.Fatalf("newSelector(): %v", err)
+	}
+	restore = captureStdout(t)
+	s.draw()
+	sOut := restore()
+	if strings.Contains(sOut, "\x1b[2J") || strings.ContainsRune(sOut, '\u202e') {
+		t.Fatalf("selector emitted unsafe sequence: %q", sOut)
+	}
+}

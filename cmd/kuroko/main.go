@@ -8,6 +8,7 @@ import (
 	"github.com/ryu/kuroko/internal/completion"
 	"github.com/ryu/kuroko/internal/config"
 	"github.com/ryu/kuroko/internal/console"
+	"github.com/ryu/kuroko/internal/launcher"
 	"github.com/ryu/kuroko/internal/session"
 	"github.com/ryu/kuroko/internal/viewer"
 )
@@ -18,6 +19,7 @@ var version = "dev"
 const usage = `kuroko — transparent terminal session logger
 
 Usage:
+  kuroko [options]                    Choose an SSH or serial connection
   kuroko [options] <command> [args...]
 
 Options:
@@ -82,8 +84,14 @@ func main() {
 
 	rest := fs.Args()
 	if len(rest) == 0 {
-		fmt.Fprint(os.Stderr, usage)
-		os.Exit(1)
+		var err error
+		rest, err = launcher.Run()
+		if err != nil {
+			fatalf("connection selection: %v", err)
+		}
+		if len(rest) == 0 {
+			return // selection cancelled
+		}
 	}
 
 	// Built-in sub-commands (after flag parsing)
