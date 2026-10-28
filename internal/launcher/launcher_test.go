@@ -26,14 +26,25 @@ func TestSSHHosts(t *testing.T) {
 	writeConfig(t, home, "config", `# ignored
 Host = router "Switch" router *.example !excluded ?test zebra Alpha alpha
   HostName not-an-alias
-Include "conf.d/*" missing
+Include "conf.d/*" missing ~
 Match exec "must never run"
   Include ~/extra-does-not-exist
 hOsT='quoted' # comment
 Host -option
+Host evil`+"\u202e"+`host
 `)
 	writeConfig(t, home, "conf.d/one", "Host included\nInclude config\n")
 	writeConfig(t, home, "conf.d/two", "Host=second\nHost router\n")
+	// Subdirectories, symlink loops, and device nodes inside conf.d/* must be skipped safely.
+	if err := os.MkdirAll(filepath.Join(home, ".ssh", "conf.d", "subdir"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, ".ssh", "config"), filepath.Join(home, ".ssh", "conf.d", "loop")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/dev/null", filepath.Join(home, ".ssh", "conf.d", "devnull")); err != nil {
+		t.Fatal(err)
+	}
 	hosts, err := sshHosts(home)
 	if err != nil {
 		t.Fatal(err)
@@ -41,6 +52,33 @@ Host -option
 	want := []string{"Alpha", "alpha", "included", "quoted", "router", "second", "Switch", "zebra"}
 	if !reflect.DeepEqual(hosts, want) {
 		t.Fatalf("hosts = %q, want %q", hosts, want)
+	}
+}
+
+func TestValidHostSecurity(t *testing.T) {
+	for _, invalid := range []string{
+		"",
+		"-oProxyCommand=sh",
+		"--",
+		"host name",
+		"host\tname",
+		"host\nname",
+		"host\x00name",
+		"host\x1b[2J",
+		"host\u202ename",
+		"*.example.com",
+		"host?1",
+		"!negated",
+		"bad\xffutf8",
+	} {
+		if validHost(invalid) {
+			t.Errorf("validHost(%q) = true; want false", invalid)
+		}
+	}
+	for _, valid := range []string{"router", "admin@192.0.2.1", "edge-sw01.example.jp"} {
+		if !validHost(valid) {
+			t.Errorf("validHost(%q) = false; want true", valid)
+		}
 	}
 }
 
@@ -101,6 +139,7 @@ func TestChoose(t *testing.T) {
 		{"manual ssh", "\n\u000eadmin@example.com\n", []string{"ssh", "admin@example.com"}},
 		{"manual host starting b", "\n\u000ebackup\n", []string{"ssh", "backup"}},
 		{"manual host starting q", "\n\u000eqa-host\n", []string{"ssh", "qa-host"}},
+		{"manual host ignores arrow keys", "\n\u000erou\x1b[A\x1b[Dter\n", []string{"ssh", "router"}},
 		{"invalid host", "\n\u000e-oProxyCommand=bad\n\nrouter\n", []string{"ssh", "router"}},
 		{"screen default", "\u001b[B\n\n\n", []string{"screen", device, "115200"}},
 		{"screen arrows", "\u001b[B\u001b[A\u001b[B\n\n\n", []string{"screen", device, "115200"}},

@@ -64,7 +64,7 @@ func (v *Viewer) headerText() string {
 	if v.activePane == PaneOutput {
 		paneStr = " PANE:  Timeline  [Output]"
 	}
-	return fmt.Sprintf(" kuroko log viewer  [ File: %s ]%s", filepath.Base(v.logPath), paneStr)
+	return fmt.Sprintf(" kuroko log viewer  [ File: %s ]%s", tui.Plain(filepath.Base(v.logPath)), paneStr)
 }
 
 // timelineCell renders body row r of the timeline (command list) pane,
@@ -91,7 +91,7 @@ func (v *Viewer) timelineCell(r, width int) string {
 	if cmd.WholeSession {
 		text = indicator + "[Session] Entire session"
 	} else {
-		text = fmt.Sprintf("%s[%s] %d. %s", indicator, ts, cmdIdx, cmd.Command)
+		text = fmt.Sprintf("%s[%s] %d. %s", indicator, ts, cmdIdx, tui.Plain(cmd.Command))
 	}
 	text = textwidth.Fit(text, width)
 
@@ -108,7 +108,7 @@ func (v *Viewer) outputCell(r, width int) string {
 	if lineIdx >= len(v.currentOutputLines) {
 		return strings.Repeat(" ", width)
 	}
-	text := textwidth.Fit(strings.ReplaceAll(v.currentOutputLines[lineIdx], "\r", ""), width)
+	text := textwidth.Fit(tui.Plain(strings.ReplaceAll(v.currentOutputLines[lineIdx], "\r", "")), width)
 
 	for idx, ml := range v.matchLines {
 		if ml == lineIdx {
@@ -122,13 +122,13 @@ func (v *Viewer) outputCell(r, width int) string {
 // typing, or a transient status message.
 func (v *Viewer) footerText() string {
 	if v.statusMessage != "" {
-		return " " + v.statusMessage
+		return " " + tui.Plain(v.statusMessage)
 	}
 	if v.inSearch {
 		if v.searchMode == SearchCommands {
-			return fmt.Sprintf(" Search commands (Enter to confirm): %s_", v.searchQuery)
+			return fmt.Sprintf(" Search commands (Enter to confirm): %s_", tui.Plain(v.searchQuery))
 		}
-		return fmt.Sprintf(" Find in output (Enter to confirm): %s_", v.searchQuery)
+		return fmt.Sprintf(" Find in output (Enter to confirm): %s_", tui.Plain(v.searchQuery))
 	}
 	if v.activePane == PaneTimeline {
 		return " [e]: Export  [Tab]: Pane  [j/k]: Move  [/]: Search Cmd  [f]: Find  [q]: Quit"

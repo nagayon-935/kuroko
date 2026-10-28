@@ -2,98 +2,131 @@ package launcher
 
 import (
 	"fmt"
+	"io"
 	"strings"
-	"unicode"
 
 	"github.com/ryu/kuroko/internal/textwidth"
 	"github.com/ryu/kuroko/internal/tui"
 )
 
-// plain prevents config values and filenames from emitting terminal controls.
-func plain(s string) string {
-	return strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
-			return ' '
+const wideMenuThreshold = 70
+
+func listBodyHeight(width, height int) int {
+	_, _, _, _, listHeight, _, _ := menuLayout(width, height)
+	return listHeight
+}
+
+func menuLayout(width, height int) (cols, rows, body, listWidth, listHeight, previewWidth, previewHeight int) {
+	// Leave the last column unused to avoid autowrap at the terminal edge.
+	cols = max(1, width-1)
+	rows = max(5, height)
+	body = rows - 4
+	if cols >= wideMenuThreshold {
+		listWidth = cols / 3
+		previewWidth = max(1, cols-listWidth-3)
+		return cols, rows, body, listWidth, body, previewWidth, body
+	}
+	listHeight = max(1, body/2)
+	previewHeight = max(1, body-listHeight-1)
+	return cols, rows, body, cols, listHeight, cols, previewHeight
+}
+
+func (p *prompt) previewText(title string, items []string, selected int) string {
+	if len(items) == 0 {
+		return "No matching candidates. Type to filter, Ctrl+U to clear, Ctrl+N to enter manually."
+	}
+	item := items[selected]
+	switch title {
+	case "SSH host":
+		return p.previews[item]
+	case "Serial device":
+		return "Device: " + item + "\nBaud rate: choose on the next screen (default 115200)"
+	default:
+		switch item {
+		case "ssh":
+			return "SSH connection\nChoose a Host from ~/.ssh/config or enter a host manually."
+		case "screen":
+			return "Serial connection\nChoose a USB serial device and baud rate."
+		default:
+			return "Select a connection."
 		}
-		return r
-	}, s)
+	}
 }
 
 func (p *prompt) drawMenu(title string, items []string, selected, scroll, previewScroll, width, height int, query string, manual, back bool) int {
-	// Leave the last column unused to avoid autowrap at the terminal edge.
-	width = max(1, width-1)
-	height = max(5, height)
-	body := height - 4
-	listWidth := width
-	preview := "Select a connection."
+	cols, totalRows, body, listWidth, listHeight, previewWidth, previewHeight := menuLayout(width, height)
 	if len(items) > 0 {
-		item := items[selected]
-		switch title {
-		case "SSH host":
-			preview = p.previews[item]
-		case "Serial device":
-			preview = "Device: " + item + "\nBaud rate: choose on the next screen (default 115200)"
-		default:
-			preview = map[string]string{"ssh": "SSH connection\nChoose a Host from ~/.ssh/config or enter a host manually.", "screen": "Serial connection\nChoose a USB serial device and baud rate."}[item]
-		}
+		selected = min(max(0, selected), len(items)-1)
 	} else {
-		preview = "No matching candidates. Type to filter, Ctrl+U to clear, Ctrl+N to enter manually."
+		selected = 0
 	}
-	listHeight, previewHeight := body, body
-	previewWidth := width
-	if width >= 70 {
-		listWidth = width / 3
-		previewWidth = width - listWidth - 3
-	} else {
-		listHeight = max(1, body/2)
-		previewHeight = max(1, body-listHeight-1)
-	}
-	lines := wrapPreview(preview, previewWidth)
+	lines := wrapPreview(p.previewText(title, items, selected), previewWidth)
 	scroll = tui.FollowSelection(selected, scroll, listHeight)
-	previewScroll = min(previewScroll, max(0, len(lines)-previewHeight))
-	rows := make([]string, height)
+	previewScroll = min(max(0, previewScroll), max(0, len(lines)-previewHeight))
+
+	rows := make([]string, totalRows)
 	rows[0] = title
-	rows[1] = "Filter: " + plain(query) + "_"
+	rows[1] = "Filter: " + tui.Plain(query) + "_"
 	if p.notice != "" {
-		rows[1] += "  " + plain(p.notice)
+		rows[1] += "  " + tui.Plain(p.notice)
 	}
 	rows[2] = "Candidates"
-	if width >= 70 {
+	if cols >= wideMenuThreshold {
 		rows[2] = textwidth.Fit(rows[2], listWidth) + " | Preview"
 	}
-	for row := 0; row < body; row++ {
+	renderBodyRows(rows[3:3+body], items, lines, selected, scroll, previewScroll, cols, listWidth, listHeight, previewWidth)
+	rows[totalRows-1] = menuFooter(cols, manual, back)
+	writeMenuFrame(p.out, rows, cols)
+	return previewScroll
+}
+
+func renderBodyRows(dst, items, lines []string, selected, scroll, previewScroll, cols, listWidth, listHeight, previewWidth int) {
+	for row := range dst {
 		list := ""
 		if row < listHeight {
-			index := scroll + row
-			if index < len(items) {
-				list = "  " + plain(items[index])
-				if index == selected {
-					list = "> " + plain(items[index])
-				}
-			} else if row == 0 {
-				list = "(no candidates)"
-			}
+			list = listRowText(items, scroll+row, selected, row)
 		}
-		if width >= 70 {
+		isSelected := scroll+row == selected && len(items) > 0
+		if cols >= wideMenuThreshold {
 			right := ""
 			if i := previewScroll + row; i < len(lines) {
-				right = plain(lines[i])
+				right = tui.Plain(lines[i])
 			}
 			left := textwidth.Fit(list, listWidth)
-			if scroll+row == selected && len(items) > 0 {
+			if isSelected {
 				left = tui.Inverse(left)
 			}
-			rows[row+3] = left + " | " + textwidth.Fit(right, max(1, width-listWidth-3))
+			dst[row] = left + " | " + textwidth.Fit(right, previewWidth)
 		} else if row < listHeight {
-			rows[row+3] = textwidth.Fit(list, width)
-			if scroll+row == selected && len(items) > 0 {
-				rows[row+3] = tui.Inverse(rows[row+3])
+			dst[row] = textwidth.Fit(list, cols)
+			if isSelected {
+				dst[row] = tui.Inverse(dst[row])
 			}
 		} else if row == listHeight {
-			rows[row+3] = "--- Preview ---"
+			dst[row] = "--- Preview ---"
 		} else if i := previewScroll + row - listHeight - 1; i < len(lines) {
-			rows[row+3] = plain(lines[i])
+			dst[row] = tui.Plain(lines[i])
 		}
+	}
+}
+
+func listRowText(items []string, index, selected, row int) string {
+	if index < len(items) {
+		prefix := "  "
+		if index == selected {
+			prefix = "> "
+		}
+		return prefix + tui.Plain(items[index])
+	}
+	if row == 0 {
+		return "(no candidates)"
+	}
+	return ""
+}
+
+func menuFooter(cols int, manual, back bool) string {
+	if cols < wideMenuThreshold {
+		return "↑↓ Enter  ^N manual ^B back ^C quit"
 	}
 	footer := "↑↓ move  Enter OK"
 	if manual {
@@ -102,28 +135,25 @@ func (p *prompt) drawMenu(title string, items []string, selected, scroll, previe
 	if back {
 		footer += "  ^B back"
 	}
-	footer += "  ^C quit  PgUp/Dn preview"
-	if width < 70 {
-		footer = "↑↓ Enter  ^N manual ^B back ^C quit"
-	}
+	return footer + "  ^C quit  PgUp/Dn preview"
+}
 
-	rows[height-1] = footer
+func writeMenuFrame(out io.Writer, rows []string, width int) {
 	var frame strings.Builder
 	frame.WriteString(tui.Home)
 	for i, row := range rows {
 		// Rows with ANSI highlights have already been sized before styling.
-		if i >= 3 && i < height-1 && strings.Contains(row, "\x1b[") {
+		if i >= 3 && i < len(rows)-1 && strings.Contains(row, "\x1b[") {
 			frame.WriteString(row)
 		} else {
 			frame.WriteString(textwidth.Fit(row, width))
 		}
 		frame.WriteString(tui.ClearEOL)
-		if i < height-1 {
+		if i < len(rows)-1 {
 			frame.WriteString("\r\n")
 		}
 	}
-	fmt.Fprint(p.out, frame.String())
-	return previewScroll
+	fmt.Fprint(out, frame.String())
 }
 
 func wrapPreview(preview string, width int) []string {
@@ -131,7 +161,7 @@ func wrapPreview(preview string, width int) []string {
 	for _, line := range strings.Split(preview, "\n") {
 		var part strings.Builder
 		columns := 0
-		for _, r := range plain(line) {
+		for _, r := range tui.Plain(line) {
 			n := textwidth.Rune(r)
 			if columns+n > width && part.Len() > 0 {
 				lines = append(lines, part.String())

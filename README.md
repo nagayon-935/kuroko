@@ -417,6 +417,8 @@ kuroko/
 ├── cmd/kuroko/main.go          # エントリポイント
 ├── internal/
 │   ├── config/config.go        # 設定管理
+│   ├── console/console.go      # 標準エラーへのステータスメッセージ出力
+│   ├── launcher/               # 引数なし起動時の対話型接続ランチャー（SSH / screen）
 │   ├── logger/
 │   │   ├── logger.go           # 端末出力の整形・ログ書き込み
 │   │   ├── storage.go          # ファイル名の確保・圧縮・ローテーション
@@ -426,7 +428,9 @@ kuroko/
 │   ├── logstore/               # ログ列挙・圧縮ログの読み込み・セッション情報・直近ログの解決
 │   ├── migration/              # 検証付きの旧ログ・設定の移行と元ファイル削除
 │   ├── completion/completion.go # シェル補完の候補計算・スクリプト生成
-│   └── viewer/viewer.go        # TUI ログビューア
+│   ├── textwidth/              # 端末表示幅の計算・切り詰め・パディング
+│   ├── tui/                    # フルスクリーン TUI 共通の端末・入力・描画ヘルパー
+│   └── viewer/                 # TUI ログセレクター・ビューア・エクスポート
 ├── go.mod
 └── Makefile
 ```

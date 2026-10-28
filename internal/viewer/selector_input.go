@@ -113,7 +113,7 @@ func (s *LogSelector) handleEscapeKey(key []byte) {
 // terminal and taking it back afterwards. Viewer and rescan failures are
 // reported in the footer; only failing to reclaim the terminal is fatal.
 func (s *LogSelector) openSelected(t *tui.Terminal) error {
-	if len(s.filtered) == 0 {
+	if s.selected < 0 || s.selected >= len(s.filtered) {
 		return nil
 	}
 	fullPath := filepath.Join(s.logDir, s.filtered[s.selected].name)

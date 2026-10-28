@@ -1,6 +1,10 @@
 package tui
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+	"unicode"
+)
 
 const (
 	// Home moves the cursor to the top-left corner without clearing, so
@@ -11,6 +15,18 @@ const (
 
 	reset = "\x1b[0m"
 )
+
+// Plain replaces terminal control characters and Unicode format characters
+// (such as bidirectional overrides) with spaces so untrusted config values,
+// filenames, and log content cannot emit escape sequences or spoof layout.
+func Plain(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return ' '
+		}
+		return r
+	}, s)
+}
 
 // Inverse renders s as black-on-white, the style used for header and
 // footer bars and the selected row.
