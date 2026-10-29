@@ -206,7 +206,44 @@ func TestNewLoggerFilePermissions(t *testing.T) {
 	}
 }
 
-func TestStripANSI(t *testing.T) {
+func TestNormalizeLineEndings(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "CRLF normalised",
+			input: "line1\r\nline2\r\n",
+			want:  "line1\nline2\n",
+		},
+		{
+			name:  "bare CR preserved for the terminal",
+			input: "text\roverwrite",
+			want:  "text\roverwrite",
+		},
+		{
+			name:  "doubled CRLF from PTY driver",
+			input: "content\r\r\n",
+			want:  "content\n",
+		},
+		{
+			name:  "plain text unchanged",
+			input: "hello world\n",
+			want:  "hello world\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := string(normalizeLineEndings([]byte(tt.input)))
+			if got != tt.want {
+				t.Errorf("normalizeLineEndings(%q)\n got  %q\n want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoggerDropsEscapeSequences(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
@@ -232,32 +269,28 @@ func TestStripANSI(t *testing.T) {
 			input: "\x1b]0;user@host: ~\x07prompt",
 			want:  "prompt",
 		},
-		{
-			name:  "CRLF normalised",
-			input: "line1\r\nline2\r\n",
-			want:  "line1\nline2\n",
-		},
-		{
-			name:  "bare CR preserved for processLine",
-			input: "text\roverwrite",
-			want:  "text\roverwrite",
-		},
-		{
-			name:  "doubled CRLF from PTY driver",
-			input: "content\r\r\n",
-			want:  "content\n",
-		},
-		{
-			name:  "plain text unchanged",
-			input: "hello world\n",
-			want:  "hello world\n",
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := string(stripANSI([]byte(tt.input)))
-			if got != tt.want {
-				t.Errorf("stripANSI(%q)\n got  %q\n want %q", tt.input, got, tt.want)
+			l, err := New(t.TempDir(), []string{"bash"}, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := l.Write([]byte(tt.input + "\r\n")); err != nil {
+				t.Fatal(err)
+			}
+			if err := l.Close(0); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(l.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(data, []byte("\x1b")) {
+				t.Errorf("log still contains ESC bytes:\n%q", data)
+			}
+			if !strings.Contains(string(data), "\n"+tt.want+"\n") {
+				t.Errorf("log missing line %q:\n%s", tt.want, data)
 			}
 		})
 	}
