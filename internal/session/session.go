@@ -132,7 +132,7 @@ func (s *Session) runWithPTY() (int, error) {
 	defer ptmx.Close()
 	s.cmd = cmd
 
-	stopResize := forwardResizeSignals(ptmx)
+	stopResize := forwardResizeSignals(ptmx, s.log.SetScreenRows)
 	defer stopResize()
 
 	// Set raw mode.
@@ -175,14 +175,22 @@ func waitResult(err error) (int, error) {
 }
 
 // forwardResizeSignals forwards terminal resize events (SIGWINCH) to the PTY
-// for as long as the session runs. The returned stop function releases the
-// signal channel and should be deferred by the caller.
-func forwardResizeSignals(ptmx *os.File) (stop func()) {
+// for as long as the session runs, and reports the PTY's resulting height to
+// onResize (if non-nil) so the logger can size its redraw window. The
+// returned stop function releases the signal channel and should be deferred
+// by the caller.
+func forwardResizeSignals(ptmx *os.File, onResize func(rows int)) (stop func()) {
 	sigWinch := make(chan os.Signal, 1)
 	signal.Notify(sigWinch, syscall.SIGWINCH)
 	go func() {
 		for range sigWinch {
 			_ = pty.InheritSize(os.Stdin, ptmx)
+			if onResize == nil {
+				continue
+			}
+			if rows, _, err := pty.Getsize(ptmx); err == nil {
+				onResize(rows)
+			}
 		}
 	}()
 	sigWinch <- syscall.SIGWINCH

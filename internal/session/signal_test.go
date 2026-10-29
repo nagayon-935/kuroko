@@ -92,11 +92,47 @@ func TestForwardResizeSignalsStop(t *testing.T) {
 	defer tty.Close()
 	defer ptmx.Close()
 
-	stop := forwardResizeSignals(ptmx)
+	stop := forwardResizeSignals(ptmx, nil)
 	// Calling stop must release the signal channel without panicking or
 	// blocking, even though the internal goroutine may still be parked on
 	// the (now-unregistered) channel.
 	stop()
+}
+
+func TestForwardResizeSignalsReportsPTYHeight(t *testing.T) {
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		t.Skipf("no PTY available in this environment: %v", err)
+	}
+	defer tty.Close()
+	defer ptmx.Close()
+	if err := pty.Setsize(ptmx, &pty.Winsize{Rows: 37, Cols: 100}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := make(chan int, 1)
+	stop := forwardResizeSignals(ptmx, func(rows int) {
+		select {
+		case got <- rows:
+		default:
+		}
+	})
+	defer stop()
+
+	select {
+	case rows := <-got:
+		// The PTY keeps the 37 rows set above unless the test's own stdin
+		// is a terminal, whose size InheritSize then copies over.
+		want, _, err := pty.Getsize(ptmx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rows != want {
+			t.Fatalf("onResize(%d); want the PTY height %d", rows, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("onResize was not called for the initial size")
+	}
 }
 
 // TestForwardResizeSignalsStopReleasesGoroutine proves stop() actually lets
@@ -113,7 +149,7 @@ func TestForwardResizeSignalsStopReleasesGoroutine(t *testing.T) {
 	defer ptmx.Close()
 
 	before := runtime.NumGoroutine()
-	stop := forwardResizeSignals(ptmx)
+	stop := forwardResizeSignals(ptmx, nil)
 	stop()
 
 	deadline := time.Now().Add(time.Second)
