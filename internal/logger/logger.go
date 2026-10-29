@@ -6,294 +6,34 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/ryu/kuroko/internal/logstore"
-	"github.com/ryu/kuroko/internal/textwidth"
 )
 
-// ansiEscape matches ANSI/VT100 terminal control sequences:
-//   - CSI:  ESC [ <params> <final>
-//   - OSC:  ESC ] <text> BEL-or-ST
-//   - two-char: ESC <byte>
-var ansiEscape = regexp.MustCompile(
-	`\x1b(?:` +
-		`\[[0-9;?<=>!#%&'()*+,\-./]*[@-~]` + // CSI sequences
-		`|\][^\x07\x1b]*(?:\x07|\x1b\\)` + // OSC sequences
-		`|[@-Z\\-_]` + // two-character sequences
-		`)`)
-
-// stripANSI removes ANSI/VT100 escape sequences, then normalises line endings.
-func stripANSI(p []byte) []byte {
-	return normalizeLineEndings(ansiEscape.ReplaceAll(p, nil))
-}
-
-// normalizeLineEndings collapses any run of \r immediately followed by \n
-// into a single \n, and leaves bare \r (not followed by \n) untouched.
+// Logger writes session output to a file as human-readable plain text.
 //
-// The local PTY driver (ONLCR) prepends \r before every \n it outputs, so
-// the remote's \r\n becomes \r\r\n.  Any number of consecutive \r before \n
-// is therefore an artifact and should be reduced to just the \n so that
-// processLine sees a plain newline instead of a cursor-return + newline.
-// Bare \r (overwrite/carriage-return without newline) is preserved so that
-// processLine can simulate readline's in-place line editing.
-func normalizeLineEndings(p []byte) []byte {
-	out := make([]byte, 0, len(p))
-	for i := 0; i < len(p); i++ {
-		if p[i] != '\r' {
-			out = append(out, p[i])
-			continue
-		}
-		// Scan past consecutive \r characters.
-		j := i + 1
-		for j < len(p) && p[j] == '\r' {
-			j++
-		}
-		if j < len(p) && p[j] == '\n' {
-			// \r+\n → skip the \r run; the loop will emit the \n next.
-			i = j - 1
-			continue
-		}
-		// Bare \r — keep it for processLine.
-		out = append(out, '\r')
-	}
-	return out
-}
-
-// incompleteEscapePrefix returns the number of trailing bytes in data that
-// look like the start of an incomplete ANSI escape sequence.  Those bytes
-// should be buffered and prepended to the next Write call.
-func incompleteEscapePrefix(data []byte) int {
-	const maxScan = 32
-	start := len(data) - maxScan
-	if start < 0 {
-		start = 0
-	}
-	for i := len(data) - 1; i >= start; i-- {
-		if data[i] != 0x1b {
-			continue
-		}
-		tail := data[i:]
-		if isCompleteEscape(tail) {
-			break // complete sequence at the end — nothing to buffer
-		}
-		return len(tail)
-	}
-	return 0
-}
-
-// isCompleteEscape reports whether seq (beginning with ESC) is a fully
-// terminated escape sequence.
-func isCompleteEscape(seq []byte) bool {
-	if len(seq) < 2 || seq[0] != 0x1b {
-		return false
-	}
-	switch seq[1] {
-	case '[': // CSI — terminated by byte in [@-~]
-		for _, c := range seq[2:] {
-			if c >= '@' && c <= '~' {
-				return true
-			}
-		}
-		return false
-	case ']': // OSC — terminated by BEL or ESC
-		for _, c := range seq[2:] {
-			if c == 0x07 || c == 0x1b {
-				return true
-			}
-		}
-		return false
-	default: // two-char sequence
-		return len(seq) >= 2
-	}
-}
-
-var (
-	enterAltScreen = []byte("\x1b[?1049h") // vim / less / htop enter
-	exitAltScreen  = []byte("\x1b[?1049l") // alternate screen exit
-)
-
-// IsShellPrompt reports whether p looks like a shell prompt.
-func IsShellPrompt(p []byte) bool {
-	if len(p) < 2 {
-		return false
-	}
-	// The prompt must start at column 0 (no leading spaces)
-	if p[0] == ' ' || p[0] == '\t' {
-		return false
-	}
-
-	var hasIndicator bool
-	var indicatorLen int
-	tail := p[len(p)-2:]
-	if bytes.Equal(tail, []byte("$ ")) || bytes.Equal(tail, []byte("# ")) || bytes.Equal(tail, []byte("% ")) || bytes.Equal(tail, []byte("> ")) {
-		hasIndicator = true
-		indicatorLen = 2
-	} else {
-		// Check for multi-byte prompts like "❯ " or "➔ "
-		if bytes.Contains(p, []byte("❯")) {
-			idx := bytes.Index(p, []byte("❯"))
-			hasIndicator = true
-			indicatorLen = len(p) - idx
-		} else if bytes.Contains(p, []byte("➔")) {
-			idx := bytes.Index(p, []byte("➔"))
-			hasIndicator = true
-			indicatorLen = len(p) - idx
-		}
-	}
-
-	if !hasIndicator {
-		return false
-	}
-
-	prefix := p[:len(p)-indicatorLen]
-	trimmedPrefix := bytes.TrimSpace(prefix)
-	if len(trimmedPrefix) == 0 {
-		return true // Raw prompts like "$ ", "# ", "❯ "
-	}
-	// Validate characters and structure of prompt prefix.
-	// It must not start with a comment character (#) or redirection (>) or dot.
-	if trimmedPrefix[0] == '#' || trimmedPrefix[0] == '>' || trimmedPrefix[0] == '.' {
-		return false
-	}
-	for _, b := range trimmedPrefix {
-		if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') {
-			continue
-		}
-		switch b {
-		case '_', '-', '.', '@', ':', '~', '/', '[', ']', '(', ')', '+', ' ':
-			continue
-		default:
-			return false
-		}
-	}
-
-	// If indicator is "$ ", "% ", or "> ", require at least one prompt-specific character
-	// to prevent false positives from commands like "echo $ " or "cat $ " or "git branch $ ".
-	isCommonIndicator := bytes.Equal(tail, []byte("$ ")) || bytes.Equal(tail, []byte("% ")) || bytes.Equal(tail, []byte("> "))
-	if isCommonIndicator {
-		if !bytes.Contains(trimmedPrefix, []byte("@")) && !bytes.Contains(trimmedPrefix, []byte(":")) &&
-			!bytes.Contains(trimmedPrefix, []byte("~")) && !bytes.Contains(trimmedPrefix, []byte("/")) &&
-			!bytes.Contains(trimmedPrefix, []byte("[")) && !bytes.Contains(trimmedPrefix, []byte("]")) &&
-			!bytes.Contains(trimmedPrefix, []byte("(")) && !bytes.Contains(trimmedPrefix, []byte(")")) {
-			return false
-		}
-	}
-
-	// Check if the trimmed prefix contains spaces.
-	if bytes.Contains(trimmedPrefix, []byte(" ")) {
-		// If it contains spaces, it must either:
-		// - start with '(' or '['
-		// - or contain prompt-specific characters: '@', ':', '~', '/', '[', ']'
-		if !bytes.HasPrefix(trimmedPrefix, []byte("(")) && !bytes.HasPrefix(trimmedPrefix, []byte("[")) &&
-			!bytes.Contains(trimmedPrefix, []byte("@")) && !bytes.Contains(trimmedPrefix, []byte(":")) &&
-			!bytes.Contains(trimmedPrefix, []byte("~")) && !bytes.Contains(trimmedPrefix, []byte("/")) &&
-			!bytes.Contains(trimmedPrefix, []byte("[")) && !bytes.Contains(trimmedPrefix, []byte("]")) {
-			return false
-		}
-	}
-	return true
-}
-
-// maxPromptLen bounds how far into a line SplitPrompt looks for the end of a
-// prompt. Real prompts, even ones showing a long working directory, are far
-// shorter. The bound keeps detection cheap on very long output lines
-// (minified JSON, base64 dumps), which are scanned on the PTY copy path where
-// any delay stalls the user's terminal.
-const maxPromptLen = 1024
-
-var (
-	heavyArrowIndicator = []byte("❯")
-	arrowIndicator      = []byte("➔")
-)
-
-// isTwoBytePromptIndicator reports whether tail is one of the two-byte
-// prompt endings IsShellPrompt recognises.
-func isTwoBytePromptIndicator(tail []byte) bool {
-	return len(tail) == 2 && tail[1] == ' ' &&
-		(tail[0] == '$' || tail[0] == '#' || tail[0] == '%' || tail[0] == '>')
-}
-
-// SplitPrompt checks if line starts with a valid shell prompt prefix.
-// If so, it returns the shortest such prompt prefix and the remaining
-// command. Otherwise, it returns nil, nil.
-//
-// It returns the same result as testing IsShellPrompt on every prefix in
-// turn, but only tests the prefixes that can match. IsShellPrompt needs an
-// indicator: the prefix ends in "$ ", "# ", "% " or "> ", or it contains ❯ or
-// ➔. A prefix that ends elsewhere can only match through an arrow it
-// contains, and then the result depends only on the text before the first
-// arrow, so the shortest prefix past each arrow stands for all the others.
-// This keeps the scan linear in the line length instead of quadratic.
-func SplitPrompt(line []byte) ([]byte, []byte) {
-	head := line[:min(len(line), maxPromptLen)]
-	heavyEnd, arrowEnd := -1, -1
-	if idx := bytes.Index(head, heavyArrowIndicator); idx >= 0 {
-		heavyEnd = idx + len(heavyArrowIndicator)
-	}
-	if idx := bytes.Index(head, arrowIndicator); idx >= 0 {
-		arrowEnd = idx + len(arrowIndicator)
-	}
-	for i := 2; i <= len(head); i++ {
-		if i != heavyEnd && i != arrowEnd && !isTwoBytePromptIndicator(head[i-2:i]) {
-			continue
-		}
-		if IsShellPrompt(head[:i]) {
-			return line[:i], line[i:]
-		}
-	}
-	return nil, nil
-}
-
-// maxPendingRows bounds the in-memory window of committed-but-not-yet-flushed
-// rows (see pendingRows). Ink-style CLIs (Claude Code, Codex, Google's
-// Antigravity CLI, …) redraw a live region — a spinner, a bordered box, a
-// streaming panel — by moving the cursor up N lines and reprinting, without
-// ever entering the alternate screen (so vim/less-style suppression doesn't
-// apply). A generous window comfortably covers any realistic live-redraw
-// region while bounding memory for pathological input.
-const maxPendingRows = 500
-
-// pendingRow is one committed terminal row buffered in memory, not yet
-// written to disk, so that a subsequent cursor-up + reprint (see the 'A'
-// case in processEscape) can overwrite it in place instead of the redraw
-// being permanently duplicated as new lines.
-type pendingRow struct {
-	meta []byte // optional "# kuroko:cmd:...\n" metadata line preceding text; nil if none
-	text []byte // the row's rendered content, without trailing newline
-}
-
-// Logger writes session output to a file, applying ANSI stripping and a
-// terminal line-buffer simulation so the log is human-readable plain text.
+// Output flows through a short pipeline: Write carries escape sequences split
+// across calls and gates full-screen (alternate screen) output, then the
+// terminal emulator turns what remains into rows — editing the current row
+// (lineBuffer), classifying prompts (promptTracker), masking credentials
+// (redactor) — and holds recent rows where cursor movement can still rewrite
+// them (rowWindow) before they reach the file.
 type Logger struct {
-	mu               sync.Mutex // guards writes, terminal state, and closure
-	file             *os.File
-	rawFile          *os.File // non-nil when KUROKO_RAW_DEBUG=1; receives raw PTY bytes
-	Path             string
-	altScreen        bool         // true while a full-screen app (vim/less) owns the terminal
-	logAltScreen     bool         // screen wraps the whole connection in alternate-screen mode
-	seqBuf           []byte       // incomplete escape sequence carried across Write calls
-	runeBuf          []byte       // incomplete UTF-8 rune carried across Write calls
-	lineBuf          []rune       // current output line, one terminal column per slot (wide runes occupy two slots; see wideContinuation)
-	lineCol          int          // cursor column within lineBuf (display columns, not bytes or runes)
-	pendingCR        bool         // \r was the last control char seen; defer reset until next char
-	savedLine        []byte       // lineBuf snapshot taken at the first bare \r before any overwrite
-	storedPrompt     []byte       // last verified shell prompt; used to recover from readline history contamination
-	writeSeq         uint64       // monotonic counter for raw debug chunks
-	redactionEnabled bool         // true if credentials should be redacted
-	inPEMBlock       bool         // state for tracking multi-line PEM blocks
-	inEsc            bool         // true if currently parsing an ANSI escape sequence
-	escBuf           []byte       // buffer for the current escape sequence
-	networkMode      bool         // true when wrapping a NW device session (ssh/telnet/screen/…)
-	pendingRows      []pendingRow // committed rows not yet flushed to disk; see commitRow
-	cursorRow        int          // index into pendingRows the next '\n' commit lands on; == len(pendingRows) means "new row"
-	closed           bool
-	closeErr         error
-	writeErr         error
+	mu           sync.Mutex // guards writes, terminal state, and closure
+	file         *os.File
+	rawFile      *os.File // non-nil when KUROKO_RAW_DEBUG=1; receives raw PTY bytes
+	Path         string
+	writeSeq     uint64    // monotonic counter for raw debug chunks
+	seqBuf       []byte    // incomplete escape sequence carried across Write calls
+	altScreen    bool      // true while a full-screen app (vim/less) owns the terminal
+	logAltScreen bool      // screen wraps the whole connection in alternate-screen mode
+	term         *terminal // turns the byte stream into log rows
+	closed       bool
+	closeErr     error
+	writeErr     error
 }
 
 func New(logDir string, args []string, redactionEnabled bool) (*Logger, error) {
@@ -327,11 +67,10 @@ func New(logDir string, args []string, redactionEnabled bool) (*Logger, error) {
 	}
 
 	l := &Logger{
-		file:             f,
-		Path:             path,
-		redactionEnabled: redactionEnabled,
-		networkMode:      isNetworkSessionCommand(args),
-		logAltScreen:     len(args) > 0 && filepath.Base(args[0]) == "screen",
+		file:         f,
+		Path:         path,
+		logAltScreen: len(args) > 0 && filepath.Base(args[0]) == "screen",
+		term:         newTerminal(f, redactionEnabled, isNetworkSessionCommand(args)),
 	}
 
 	if os.Getenv("KUROKO_RAW_DEBUG") == "1" {
@@ -387,9 +126,9 @@ func (l *Logger) writeFiltered(data []byte) error {
 		if !l.altScreen {
 			idx := bytes.Index(data, enterAltScreen)
 			if idx < 0 {
-				return l.processLine(normalizeLineEndings(data))
+				return l.term.feed(normalizeLineEndings(data))
 			}
-			if err := l.processLine(normalizeLineEndings(data[:idx])); err != nil {
+			if err := l.term.feed(normalizeLineEndings(data[:idx])); err != nil {
 				return err
 			}
 			// Consume the transition; screen sessions keep the output inside it.
@@ -399,12 +138,12 @@ func (l *Logger) writeFiltered(data []byte) error {
 			idx := bytes.Index(data, exitAltScreen)
 			if idx < 0 {
 				if l.logAltScreen {
-					return l.processLine(normalizeLineEndings(data))
+					return l.term.feed(normalizeLineEndings(data))
 				}
 				return nil // still inside alternate screen; discard
 			}
 			if l.logAltScreen {
-				if err := l.processLine(normalizeLineEndings(data[:idx])); err != nil {
+				if err := l.term.feed(normalizeLineEndings(data[:idx])); err != nil {
 					return err
 				}
 			}
@@ -413,362 +152,6 @@ func (l *Logger) writeFiltered(data []byte) error {
 		}
 	}
 	return nil
-}
-
-// processLine feeds ANSI-stripped bytes through a terminal line-buffer
-// simulation.  This handles the control characters that readline uses for
-// in-place line editing:
-//   - \r  (0x0D) carriage return — set pendingCR; the reset to column 0 is
-//     deferred until the next printable character arrives.
-//   - \b  (0x08) backspace — move cursor one column left
-//   - \n  (0x0A) newline    — commit the current line to the file
-//
-// pendingCR is the key to handling the PTY driver's ONLCR behaviour: the
-// driver converts \r\n → \r\r\n, and that sequence is often split across
-// two successive write calls (\r at the end of one, \n at the start of the
-// next).  By NOT resetting lineCol immediately on \r, the content built up
-// in lineBuf survives until the \n commits it.  If a printable char follows
-// \r instead (readline overwrite), the deferred reset fires then.
-//
-// savedLine handles the readline "accept-line" redraw: just before executing
-// a command, bash/readline erases the prompt and redraws only the bare command
-// text (e.g. "cat foo" instead of "user@host:~$ cat foo").  The first bare \r
-// snapshots the full prompt+command into savedLine; if the subsequent overwrite
-// produces fewer chars, we commit savedLine so the prompt is preserved.
-func (l *Logger) processLine(data []byte) error {
-	for _, b := range data {
-		if l.inEsc {
-			l.escBuf = append(l.escBuf, b)
-			if isCompleteEscape(l.escBuf) || len(l.escBuf) > 64 {
-				l.inEsc = false
-				if len(l.escBuf) <= 64 {
-					l.processEscape(l.escBuf)
-				}
-			}
-			continue
-		}
-		if b == 0x1b {
-			if l.pendingCR {
-				l.snapshotSavedLine()
-			}
-			l.inEsc = true
-			l.escBuf = []byte{b}
-			continue
-		}
-
-		switch b {
-		case '\n':
-			// If pendingCR is set the \r was the CR half of a CRLF pair —
-			// do not reset lineCol; commit the content that is already there.
-			l.pendingCR = false
-			out := l.currentLine()
-
-			var hasCommand bool
-
-			// Try to detect and extract the command and prompt.
-			if prompt, cmd := SplitPrompt(out); prompt != nil {
-				// Case 1: Shell prompt (bash/zsh/…).
-				l.storedPrompt = append(l.storedPrompt[:0], prompt...)
-				if len(cmd) > 0 {
-					hasCommand = true
-				}
-			} else if l.networkMode {
-				// Case 1b: Network device prompt (Cisco/Arista/Juniper/…).
-				// NW devices do not perform readline accept-line redraws, so we
-				// detect the prompt directly from the committed line.
-				if prompt, cmd, info := SplitPromptInfo(out); info.Kind != KindNone && info.Kind != KindShell {
-					l.storedPrompt = append(l.storedPrompt[:0], prompt...)
-					if len(cmd) > 0 {
-						hasCommand = true
-					}
-				}
-			}
-			if !hasCommand {
-				out, hasCommand = l.restoreSavedPrompt(out)
-			}
-
-			var meta []byte
-			if hasCommand {
-				meta = []byte(fmt.Sprintf("# kuroko:cmd:%s\n", time.Now().Format(time.RFC3339)))
-			}
-
-			if l.redactionEnabled {
-				out = l.redact(out)
-			}
-			if err := l.commitRow(pendingRow{meta: meta, text: out}); err != nil {
-				return err
-			}
-			l.lineBuf = l.lineBuf[:0]
-			l.lineCol = 0
-			l.savedLine = nil
-		case '\r':
-			l.pendingCR = true
-		case '\b':
-			if l.pendingCR {
-				l.lineCol = 0
-				l.pendingCR = false
-			}
-			if l.lineCol > 0 {
-				l.lineCol--
-			}
-		default:
-			if b < 0x20 {
-				continue // discard other non-printable control bytes
-			}
-			// Accumulate UTF-8 bytes until a full rune is available; a
-			// multi-byte character (e.g. Japanese) may be split across
-			// several PTY bytes, or even across Write() calls, since this
-			// state persists on the Logger between calls.
-			l.runeBuf = append(l.runeBuf, b)
-			if !utf8.FullRune(l.runeBuf) {
-				continue
-			}
-			r, _ := utf8.DecodeRune(l.runeBuf)
-			l.runeBuf = l.runeBuf[:0]
-
-			if l.pendingCR {
-				l.snapshotSavedLine()
-			}
-			l.putRune(r)
-		}
-	}
-	return nil
-}
-
-func (l *Logger) currentLine() []byte {
-	return renderLine(l.lineBuf[:min(l.lineCol, len(l.lineBuf))])
-}
-
-// restoreSavedPrompt reconstructs the prompt when a readline accept-line
-// redraw overwrote the full prompt+command line with a shorter bare command.
-func (l *Logger) restoreSavedPrompt(out []byte) ([]byte, bool) {
-	if len(l.savedLine) <= len(out) {
-		return out, false
-	}
-	bare := out
-	if len(bare) == 0 {
-		return l.savedLine, false
-	}
-	prompt, cmd := SplitPrompt(l.savedLine)
-	if prompt == nil {
-		return out, false
-	}
-	// Verify if the command in savedLine matches bare, or savedLine is just the prompt.
-	if bytes.Equal(cmd, bare) || len(cmd) == 0 {
-		// Case 2: Prompt + command matches bare command, or savedLine is just the prompt.
-		l.storedPrompt = append(l.storedPrompt[:0], prompt...)
-		return append(append([]byte{}, prompt...), bare...), true
-	}
-	if len(l.storedPrompt) > 0 {
-		// Case 3: History contamination (mismatch). Reconstruct from stored prompt.
-		return append(append([]byte{}, l.storedPrompt...), bare...), true
-	}
-	return out, false
-}
-
-// snapshotSavedLine captures the current lineBuf, up to the cursor, into
-// savedLine when it looks like a valid shell prompt, then resets lineCol to
-// 0. It runs on the first escape or printable byte to arrive after a bare
-// \r (pendingCR), just before that byte overwrites lineBuf — see the
-// processLine doc comment for why this snapshot is needed to survive
-// readline's accept-line redraw.
-func (l *Logger) snapshotSavedLine() {
-	if l.lineCol > 0 {
-		committed := l.currentLine()
-		if prompt, _ := SplitPrompt(committed); prompt != nil {
-			l.savedLine = append(l.savedLine[:0], committed...)
-			l.storedPrompt = append(l.storedPrompt[:0], prompt...)
-		}
-	}
-	l.lineCol = 0
-	l.pendingCR = false
-}
-
-// commitRow places row at the current cursor position within the pending
-// window: if the cursor was moved up via ESC[<n>A (cursorRow points at an
-// already-buffered row), it overwrites that row in place — the redraw
-// simply replaces the stale frame instead of duplicating it — otherwise it
-// appends a new row. Rows that scroll off the top of the window (beyond
-// maxPendingRows) are flushed to disk in order, since a live-redraw region
-// is never that tall in practice.
-func (l *Logger) commitRow(row pendingRow) error {
-	if l.cursorRow < len(l.pendingRows) {
-		l.pendingRows[l.cursorRow] = row
-	} else {
-		l.pendingRows = append(l.pendingRows, row)
-	}
-	l.cursorRow++
-	for len(l.pendingRows) > maxPendingRows {
-		if err := l.flushRow(l.pendingRows[0]); err != nil {
-			return err
-		}
-		l.pendingRows = l.pendingRows[1:]
-		l.cursorRow--
-	}
-	return nil
-}
-
-// flushRow writes one buffered row (and its optional metadata line) to disk.
-func (l *Logger) flushRow(row pendingRow) error {
-	if len(row.meta) > 0 {
-		if _, err := l.file.Write(row.meta); err != nil {
-			return err
-		}
-	}
-	_, err := l.file.Write(append(row.text, '\n'))
-	return err
-}
-
-// flushPendingRows writes every remaining buffered row to disk in order,
-// e.g. once the session ends and no further redraw can occur.
-func (l *Logger) flushPendingRows() error {
-	for _, row := range l.pendingRows {
-		if err := l.flushRow(row); err != nil {
-			return err
-		}
-	}
-	l.pendingRows = nil
-	l.cursorRow = 0
-	return nil
-}
-
-// wideContinuation marks the second terminal column occupied by an East
-// Asian Wide/Fullwidth rune (see internal/textwidth). It lets lineBuf be
-// indexed directly by column — matching how a real terminal's cell grid
-// works — while renderLine skips these placeholder cells when reassembling
-// the actual text.
-const wideContinuation rune = 0
-
-// renderLine reassembles the text represented by a column-indexed cell
-// slice, skipping wideContinuation placeholder cells. It is the inverse of
-// putRune, which spreads one rune across 1 or 2 columns.
-func renderLine(cells []rune) []byte {
-	var buf bytes.Buffer
-	buf.Grow(len(cells))
-	for _, r := range cells {
-		if r == wideContinuation {
-			continue
-		}
-		buf.WriteRune(r)
-	}
-	return buf.Bytes()
-}
-
-// putRune writes r at the cursor's current column — padding lineBuf with
-// spaces if the cursor was previously moved past the end of the buffer,
-// e.g. by CSI C — and advances lineCol by r's terminal display width. A
-// wide rune occupies two consecutive columns: the rune itself in the
-// first, and wideContinuation in the second, so that an edit later
-// overwriting only the second column doesn't leave the buffer holding a
-// rune through just one of its two cells.
-func (l *Logger) putRune(r rune) {
-	w := textwidth.Rune(r)
-	if w <= 0 {
-		// Control/combining runes: occupy one column rather than zero, to
-		// keep the column model simple. These are rare in the shell
-		// prompts and NW device output kuroko targets.
-		w = 1
-	}
-	l.setCell(l.lineCol, r)
-	for i := 1; i < w; i++ {
-		l.setCell(l.lineCol+i, wideContinuation)
-	}
-	l.lineCol += w
-}
-
-// setCell writes r at column col, padding lineBuf with spaces up to col if
-// the cursor had previously moved past the end of the buffer.
-func (l *Logger) setCell(col int, r rune) {
-	for len(l.lineBuf) < col {
-		l.lineBuf = append(l.lineBuf, ' ')
-	}
-	if col < len(l.lineBuf) {
-		l.lineBuf[col] = r
-	} else {
-		l.lineBuf = append(l.lineBuf, r)
-	}
-}
-
-func (l *Logger) processEscape(seq []byte) {
-	if len(seq) < 3 || seq[1] != '[' {
-		return // Ignore non-CSI sequences (like OSC title or two-char codes)
-	}
-
-	final := seq[len(seq)-1]
-	paramsStr := string(seq[2 : len(seq)-1])
-
-	// Parse parameter N (default to 1)
-	n := 1
-	if paramsStr != "" {
-		// Clean parameter string from non-digits (like semi-colons or modifiers)
-		var val int
-		var found bool
-		for i := 0; i < len(paramsStr); i++ {
-			c := paramsStr[i]
-			if c >= '0' && c <= '9' {
-				val = val*10 + int(c-'0')
-				found = true
-			} else {
-				if found {
-					break
-				}
-			}
-		}
-		if found && val > 0 {
-			n = val
-		}
-	}
-
-	switch final {
-	case 'K': // Clear line from cursor
-		if len(paramsStr) == 0 || paramsStr == "0" {
-			if l.lineCol < len(l.lineBuf) {
-				l.lineBuf = l.lineBuf[:l.lineCol]
-			}
-		} else if paramsStr == "2" {
-			l.lineBuf = l.lineBuf[:0]
-			l.lineCol = 0
-		}
-	case 'C': // Cursor Forward (Right)
-		l.lineCol += n
-	case 'D': // Cursor Backward (Left)
-		l.lineCol -= n
-		if l.lineCol < 0 {
-			l.lineCol = 0
-		}
-	case 'A': // Cursor Up — re-target a previously committed, still-pending
-		// row so the next '\n' commit overwrites it in place (Ink-style
-		// redraw) instead of appending a duplicate line.
-		l.cursorRow -= n
-		if l.cursorRow < 0 {
-			l.cursorRow = 0
-		}
-	case 'B': // Cursor Down
-		l.cursorRow += n
-		if l.cursorRow > len(l.pendingRows) {
-			l.cursorRow = len(l.pendingRows)
-		}
-	case 'J': // Erase in Display — drop buffered rows the redraw is about
-		// to overwrite (param 0/none) or the whole pending window (2/3).
-		if paramsStr == "" || paramsStr == "0" {
-			if l.cursorRow < len(l.pendingRows) {
-				l.pendingRows = l.pendingRows[:l.cursorRow]
-			}
-		} else if paramsStr == "2" || paramsStr == "3" {
-			l.pendingRows = l.pendingRows[:0]
-			l.cursorRow = 0
-		}
-	case 'P': // Delete character(s) at cursor
-		if l.lineCol < len(l.lineBuf) {
-			// Shift remaining characters left by n
-			if l.lineCol+n < len(l.lineBuf) {
-				copy(l.lineBuf[l.lineCol:], l.lineBuf[l.lineCol+n:])
-				l.lineBuf = l.lineBuf[:len(l.lineBuf)-n]
-			} else {
-				l.lineBuf = l.lineBuf[:l.lineCol]
-			}
-		}
-	}
 }
 
 // Close flushes any remaining buffered output, writes the session footer, and
@@ -796,24 +179,10 @@ func (l *Logger) doClose(exitCode int) (err error) {
 		}
 	}()
 
-	// Flush any rows still buffered for a possible cursor-up redraw — the
-	// session is ending, so no further redraw can occur.
-	if err := l.flushPendingRows(); err != nil {
+	// The session is ending, so no further redraw can occur: write out every
+	// row still held for one, including an unterminated last line.
+	if err := l.term.finish(); err != nil {
 		return err
-	}
-
-	// Flush any unterminated line; apply the same savedLine validation as processLine.
-	out := l.currentLine()
-	if prompt, _ := SplitPrompt(out); prompt == nil {
-		out, _ = l.restoreSavedPrompt(out)
-	}
-	if len(out) > 0 {
-		if l.redactionEnabled {
-			out = l.redact(out)
-		}
-		if _, err := l.file.Write(append(out, '\n')); err != nil {
-			return err
-		}
 	}
 
 	footer := fmt.Sprintf(
@@ -824,49 +193,6 @@ func (l *Logger) doClose(exitCode int) (err error) {
 	)
 	_, err = l.file.WriteString(footer)
 	return err
-}
-
-var (
-	awsAccessKeyPattern = regexp.MustCompile(`AKIA[0-9A-Z]{16}`)
-	awsSecretKeyPattern = regexp.MustCompile(`(?i)(aws_secret_access_key|secret_key|secret)\s*[:=]\s*["']?([A-Za-z0-9/+=]{40})["']?`)
-	bearerTokenPattern  = regexp.MustCompile(`(?i)Bearer\s+([a-zA-Z0-9_\-\.\+\/\\=]+)`)
-	sqlPasswordPattern  = regexp.MustCompile(`(?i)identified\s+by\s+'([^']+)'`)
-)
-
-func redactSubmatch(line []byte, re *regexp.Regexp, group int, placeholder []byte) []byte {
-	return re.ReplaceAllFunc(line, func(match []byte) []byte {
-		if parts := re.FindSubmatch(match); len(parts) > group {
-			return bytes.Replace(match, parts[group], placeholder, 1)
-		}
-		return match
-	})
-}
-
-func (l *Logger) redact(line []byte) []byte {
-	if !l.redactionEnabled {
-		return line
-	}
-
-	lineStr := string(line)
-
-	// Stateful PEM Block redaction
-	if strings.Contains(lineStr, "-----BEGIN") && strings.Contains(lineStr, "PRIVATE KEY-----") {
-		l.inPEMBlock = true
-		return []byte("[PEM PRIVATE KEY BLOCK STARTED - REDACTED]")
-	}
-	if l.inPEMBlock {
-		if strings.Contains(lineStr, "-----END") && strings.Contains(lineStr, "PRIVATE KEY-----") {
-			l.inPEMBlock = false
-			return []byte("[PEM PRIVATE KEY BLOCK ENDED - REDACTED]")
-		}
-		return []byte("[PEM PRIVATE KEY DATA - REDACTED]")
-	}
-
-	line = awsAccessKeyPattern.ReplaceAll(line, []byte("[AWS_ACCESS_KEY_REDACTED]"))
-	line = redactSubmatch(line, awsSecretKeyPattern, 2, []byte("[AWS_SECRET_KEY_REDACTED]"))
-	line = redactSubmatch(line, bearerTokenPattern, 1, []byte("[TOKEN_REDACTED]"))
-	line = redactSubmatch(line, sqlPasswordPattern, 1, []byte("[PASSWORD_REDACTED]"))
-	return line
 }
 
 // InAltScreen returns true if a full-screen application (like vim) is active.
