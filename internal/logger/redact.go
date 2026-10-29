@@ -52,3 +52,20 @@ func (r *redactor) redact(line []byte) []byte {
 	line = redactSubmatch(line, sqlPasswordPattern, 1, []byte("[PASSWORD_REDACTED]"))
 	return line
 }
+
+// RedactText masks credentials in a whole log text, line by line, the same
+// way redaction does while a session is recorded. It is used for log content
+// that leaves the machine, such as webhook notifications.
+func RedactText(text []byte) []byte {
+	var r redactor
+	lines := bytes.SplitAfter(text, []byte("\n"))
+	out := make([]byte, 0, len(text))
+	for _, line := range lines {
+		body, hasNewline := bytes.CutSuffix(line, []byte("\n"))
+		out = append(out, r.redact(body)...)
+		if hasNewline {
+			out = append(out, '\n')
+		}
+	}
+	return out
+}

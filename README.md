@@ -374,6 +374,9 @@ user@junos> show route       → 記録
     "type": "none",
     "webhook_url": ""
   },
+  "redaction": {
+    "enabled": true
+  },
   "banner": {
     "enabled": true,
     "rules": [
@@ -382,6 +385,17 @@ user@junos> show route       → 記録
   }
 }
 ```
+
+### 認証情報のマスキング
+
+`redaction.enabled` を `true` にすると、ログに書き込む前に次の情報を伏せ字に置き換えます（既定は無効）。
+
+- AWS アクセスキー ID（`AKIA...`）とシークレットアクセスキー
+- `Bearer` トークン
+- SQL の `IDENTIFIED BY '...'` のパスワード
+- PEM 形式の秘密鍵ブロック
+
+マスキングが有効な間は、デバッグ用の `KUROKO_RAW_DEBUG=1` を指定しても、加工前の出力を保存する `.raw` ファイルは作成しません。
 
 ### 設定の優先順位
 
@@ -400,6 +414,12 @@ user@junos> show route       → 記録
 ## 通知機能（Discord / Slack）
 
 セッション終了時にログを自動送信できます。
+
+- Discord: ログ全体をテキストファイルとして添付します（8 MiB を超える場合は末尾の 8 MiB）。
+- Slack: ログの末尾 2,500 バイトをメッセージに含めます。
+
+圧縮したログ（`.log.gz`）も展開したテキストで送ります。
+外部に送る内容（ログとコマンド）は、`redaction.enabled` の設定にかかわらず常に[マスキング](#認証情報のマスキング)してから送信します。
 
 ### Discord
 

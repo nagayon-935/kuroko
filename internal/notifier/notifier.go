@@ -4,11 +4,16 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"mime/multipart"
 	"net/http"
-	"os"
 	"path/filepath"
+	"strings"
 	"time"
+	"unicode/utf8"
+
+	"github.com/ryu/kuroko/internal/logger"
+	"github.com/ryu/kuroko/internal/logstore"
 )
 
 // Notifier sends session events to external services.
@@ -52,7 +57,7 @@ func (d *discordNotifier) NotifyStart(command string) error {
 		"color":       0x3498db, // blue
 		"description": "🔌 Connected",
 		"fields": []any{
-			map[string]any{"name": "Command", "value": fmt.Sprintf("`%s`", command), "inline": false},
+			map[string]any{"name": "Command", "value": fmt.Sprintf("`%s`", redactCommand(command)), "inline": false},
 		},
 		"timestamp": time.Now().UTC().Format(time.RFC3339),
 	}
@@ -60,10 +65,11 @@ func (d *discordNotifier) NotifyStart(command string) error {
 }
 
 func (d *discordNotifier) NotifyEnd(logPath, command string, exitCode int, duration time.Duration) error {
-	logContent, err := os.ReadFile(logPath)
+	logContent, err := readLogForSending(logPath)
 	if err != nil {
-		return fmt.Errorf("reading log: %w", err)
+		return err
 	}
+	logContent = []byte(truncate(string(logContent), maxAttachmentBytes))
 
 	color := 0x2ecc71 // green = success
 	status := "✅ Success"
@@ -77,7 +83,7 @@ func (d *discordNotifier) NotifyEnd(logPath, command string, exitCode int, durat
 		"color":       color,
 		"description": status,
 		"fields": []any{
-			map[string]any{"name": "Command", "value": fmt.Sprintf("`%s`", command), "inline": true},
+			map[string]any{"name": "Command", "value": fmt.Sprintf("`%s`", redactCommand(command)), "inline": true},
 			map[string]any{"name": "Duration", "value": formatDuration(duration), "inline": true},
 			map[string]any{"name": "Log file", "value": filepath.Base(logPath), "inline": false},
 		},
@@ -101,7 +107,8 @@ func (d *discordNotifier) NotifyEnd(logPath, command string, exitCode int, durat
 		return fmt.Errorf("writing payload_json field: %w", err)
 	}
 
-	fw, err := mw.CreateFormFile("files[0]", filepath.Base(logPath))
+	// The attachment is the decompressed text, so it drops a .gz suffix.
+	fw, err := mw.CreateFormFile("files[0]", strings.TrimSuffix(filepath.Base(logPath), ".gz"))
 	if err != nil {
 		return fmt.Errorf("creating file field: %w", err)
 	}
@@ -140,26 +147,53 @@ type slackNotifier struct{ webhookURL string }
 
 func (s *slackNotifier) NotifyStart(command string) error {
 	return postJSON(s.webhookURL, map[string]string{
-		"text": fmt.Sprintf("🔌 *kuroko* session started: `%s`", command),
+		"text": fmt.Sprintf("🔌 *kuroko* session started: `%s`", redactCommand(command)),
 	})
 }
 
 func (s *slackNotifier) NotifyEnd(logPath, command string, exitCode int, duration time.Duration) error {
-	logContent, err := os.ReadFile(logPath)
+	logContent, err := readLogForSending(logPath)
 	if err != nil {
-		return fmt.Errorf("reading log: %w", err)
+		return err
 	}
 	icon := "✅"
 	if exitCode != 0 {
 		icon = "❌"
 	}
+	// A ``` inside the log would close the code block early; a zero-width
+	// space keeps it literal.
+	excerpt := strings.ReplaceAll(truncate(string(logContent), 2500), "```", "``\u200b`")
 	text := fmt.Sprintf("%s *kuroko* `%s` ended (exit %d, %s)\n```%s```",
-		icon, command, exitCode, formatDuration(duration),
-		truncate(string(logContent), 2500))
+		icon, redactCommand(command), exitCode, formatDuration(duration), excerpt)
 	return postJSON(s.webhookURL, map[string]string{"text": text})
 }
 
 // --- helpers ---
+
+// maxAttachmentBytes keeps the Discord attachment below the webhook upload
+// limit (10 MiB on most servers); longer logs keep their end.
+const maxAttachmentBytes = 8 << 20
+
+// readLogForSending returns the text of the log at logPath, decompressing a
+// .gz log, with credentials masked. The content leaves the machine, so it is
+// masked even when redaction is off for the local log file.
+func readLogForSending(logPath string) ([]byte, error) {
+	r, err := logstore.Open(logPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading log: %w", err)
+	}
+	defer r.Close()
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("reading log: %w", err)
+	}
+	return logger.RedactText(data), nil
+}
+
+// redactCommand masks credentials in a command line before it is sent.
+func redactCommand(command string) string {
+	return string(logger.RedactText([]byte(command)))
+}
 
 // httpClient is used for all webhook requests. A bounded timeout prevents an
 // unreachable or slow webhook from hanging session start/end indefinitely.
@@ -204,9 +238,14 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%ds", s)
 }
 
+// truncate keeps the last max bytes of s, starting at a rune boundary.
 func truncate(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
-	return "...(truncated)...\n" + s[len(s)-max:]
+	tail := s[len(s)-max:]
+	for len(tail) > 0 && !utf8.RuneStart(tail[0]) {
+		tail = tail[1:]
+	}
+	return "...(truncated)...\n" + tail
 }
