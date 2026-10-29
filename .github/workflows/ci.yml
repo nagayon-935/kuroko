@@ -8,16 +8,25 @@ on:
 
 jobs:
   test:
-    name: Test & Coverage
+    name: Test (Go ${{ matrix.go-version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The minimum version in go.mod, and the current release that
+        # release builds use.
+        go-version: ['1.22', 'stable']
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: ${{ matrix.go-version }}
           cache: true
+
+      - name: Vet
+        run: go vet ./...
 
       - name: Run tests
         run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
@@ -26,6 +35,44 @@ jobs:
         run: go tool cover -func=coverage.out | tail -1
 
       - name: Upload coverage to Coveralls
+        if: matrix.go-version == 'stable'
         uses: shogo82148/actions-goveralls@v1
         with:
           path-to-profile: coverage.out
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 ./...
+
+  vulncheck:
+    name: Vulnerability check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Checks the dependencies and the standard library of the Go release
+      # that release builds use.
+      - uses: golang/govulncheck-action@v1
+        with:
+          go-version-input: stable

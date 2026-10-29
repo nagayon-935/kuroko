@@ -164,7 +164,7 @@ func (r *sshConfigReader) readIncludes(patterns []string) error {
 		}
 		matches, err := filepath.Glob(pattern)
 		if err != nil {
-			return fmt.Errorf("Include %q: %w", pattern, err)
+			return fmt.Errorf("ssh config Include %q: %w", pattern, err)
 		}
 		for _, match := range matches {
 			if err := r.readFile(match); err != nil {

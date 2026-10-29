@@ -18,9 +18,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Release binaries embed the Go standard library (net/http, crypto/tls
+      # for webhooks), so they are built with the current Go release to pick
+      # up its security fixes; go.mod's version is only the minimum.
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: stable
           cache: true
 
       - name: Run GoReleaser
