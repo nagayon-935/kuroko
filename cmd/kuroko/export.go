@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/ryu/kuroko/internal/config"
-	"github.com/ryu/kuroko/internal/logstore"
-	"github.com/ryu/kuroko/internal/viewer"
+	"github.com/nagayon-935/kuroko/internal/config"
+	"github.com/nagayon-935/kuroko/internal/logstore"
+	"github.com/nagayon-935/kuroko/internal/viewer"
 )
 
 const exportUsage = "usage: kuroko export [--last | <logfile>] [--command N] [-o <file>]\nWithout --command, exports the entire session. Without -o, writes to stdout.\n"

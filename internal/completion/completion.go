@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ryu/kuroko/internal/config"
-	"github.com/ryu/kuroko/internal/logstore"
+	"github.com/nagayon-935/kuroko/internal/config"
+	"github.com/nagayon-935/kuroko/internal/logstore"
 )
 
 // subcommands are the built-in kuroko subcommand words (in addition to

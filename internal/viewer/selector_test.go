@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ryu/kuroko/internal/config"
-	"github.com/ryu/kuroko/internal/textwidth"
+	"github.com/nagayon-935/kuroko/internal/config"
+	"github.com/nagayon-935/kuroko/internal/textwidth"
 )
 
 func TestFormatSize(t *testing.T) {

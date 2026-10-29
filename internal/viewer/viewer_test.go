@@ -11,7 +11,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/ryu/kuroko/internal/textwidth"
+	"github.com/nagayon-935/kuroko/internal/textwidth"
 )
 
 // ansiEscapeRegexp strips SGR/CSI escape sequences (colors, cursor moves,

@@ -1,4 +1,4 @@
-module github.com/ryu/kuroko
+module github.com/nagayon-935/kuroko
 
 go 1.22
 

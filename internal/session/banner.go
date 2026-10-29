@@ -6,9 +6,9 @@ import (
 	"net"
 	"strings"
 
-	"github.com/ryu/kuroko/internal/config"
-	"github.com/ryu/kuroko/internal/logger"
-	"github.com/ryu/kuroko/internal/textwidth"
+	"github.com/nagayon-935/kuroko/internal/config"
+	"github.com/nagayon-935/kuroko/internal/logger"
+	"github.com/nagayon-935/kuroko/internal/textwidth"
 )
 
 // ansiColor maps color name strings to ANSI foreground escape codes.

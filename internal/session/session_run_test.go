@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ryu/kuroko/internal/config"
+	"github.com/nagayon-935/kuroko/internal/config"
 )
 
 func TestWaitResultNilError(t *testing.T) {

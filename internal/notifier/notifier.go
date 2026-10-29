@@ -12,8 +12,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/ryu/kuroko/internal/logger"
-	"github.com/ryu/kuroko/internal/logstore"
+	"github.com/nagayon-935/kuroko/internal/logger"
+	"github.com/nagayon-935/kuroko/internal/logstore"
 )
 
 // Notifier sends session events to external services.

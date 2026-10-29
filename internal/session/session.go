@@ -15,10 +15,10 @@ import (
 	"github.com/creack/pty"
 	"golang.org/x/term"
 
-	"github.com/ryu/kuroko/internal/config"
-	"github.com/ryu/kuroko/internal/console"
-	"github.com/ryu/kuroko/internal/logger"
-	"github.com/ryu/kuroko/internal/notifier"
+	"github.com/nagayon-935/kuroko/internal/config"
+	"github.com/nagayon-935/kuroko/internal/console"
+	"github.com/nagayon-935/kuroko/internal/logger"
+	"github.com/nagayon-935/kuroko/internal/notifier"
 )
 
 type Session struct {

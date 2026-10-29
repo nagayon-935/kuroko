@@ -5,7 +5,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/ryu/kuroko/internal/console"
+	"github.com/nagayon-935/kuroko/internal/console"
 )
 
 // failOpenWriter wraps an io.Writer so that a write error (or short write)

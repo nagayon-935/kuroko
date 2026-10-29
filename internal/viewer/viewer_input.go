@@ -1,6 +1,6 @@
 package viewer
 
-import "github.com/ryu/kuroko/internal/tui"
+import "github.com/nagayon-935/kuroko/internal/tui"
 
 func (v *Viewer) loop() error {
 	t, err := tui.Open()

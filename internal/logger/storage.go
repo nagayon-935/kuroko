@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ryu/kuroko/internal/logstore"
+	"github.com/nagayon-935/kuroko/internal/logstore"
 )
 
 // createLogFile reserves a unique name atomically. A separate Stat followed

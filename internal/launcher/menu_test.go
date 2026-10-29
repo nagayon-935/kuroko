@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ryu/kuroko/internal/textwidth"
+	"github.com/nagayon-935/kuroko/internal/textwidth"
 )
 
 func TestSSHPreviewSources(t *testing.T) {

@@ -7,10 +7,10 @@ import (
 	"io"
 	"os"
 
-	"github.com/ryu/kuroko/internal/config"
-	"github.com/ryu/kuroko/internal/logstore"
-	"github.com/ryu/kuroko/internal/migration"
-	"github.com/ryu/kuroko/internal/viewer"
+	"github.com/nagayon-935/kuroko/internal/config"
+	"github.com/nagayon-935/kuroko/internal/logstore"
+	"github.com/nagayon-935/kuroko/internal/migration"
+	"github.com/nagayon-935/kuroko/internal/viewer"
 )
 
 func runLogs(args []string, logDir string, stdout, stderr io.Writer) error {

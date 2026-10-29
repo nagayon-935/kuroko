@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ryu/kuroko/internal/config"
-	"github.com/ryu/kuroko/internal/logstore"
-	"github.com/ryu/kuroko/internal/session"
+	"github.com/nagayon-935/kuroko/internal/config"
+	"github.com/nagayon-935/kuroko/internal/logstore"
+	"github.com/nagayon-935/kuroko/internal/session"
 )
 
 func minimalConfig(t *testing.T) *config.Config {
