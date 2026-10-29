@@ -191,8 +191,29 @@ func (l *Logger) doClose(exitCode int) (err error) {
 		time.Now().Format(time.RFC3339Nano),
 		exitCode,
 	)
-	_, err = l.file.WriteString(footer)
-	return err
+	if _, err := l.file.WriteString(footer); err != nil {
+		return err
+	}
+	// Make the finished log durable before reporting it saved: closing the
+	// file alone leaves the data in the page cache until the kernel writes
+	// it back, so a power loss right after the session could still lose it.
+	return l.file.Sync()
+}
+
+// SetScreenRows tells the logger how many rows the user's terminal shows.
+// Cursor movement cannot reach rows that have scrolled off the top of the
+// screen, so only that many recent rows stay in memory for a redraw to
+// rewrite; older ones go to the file right away. This bounds what a crash
+// can lose to about one screen. Non-positive heights are ignored.
+func (l *Logger) SetScreenRows(rows int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return
+	}
+	if err := l.term.rows.setLimit(rows); err != nil && l.writeErr == nil {
+		l.writeErr = err
+	}
 }
 
 // InAltScreen returns true if a full-screen application (like vim) is active.

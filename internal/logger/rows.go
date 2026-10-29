@@ -8,7 +8,8 @@ import "io"
 // streaming panel — by moving the cursor up N lines and reprinting, without
 // ever entering the alternate screen (so vim/less-style suppression doesn't
 // apply). A generous window comfortably covers any realistic live-redraw
-// region while bounding memory for pathological input.
+// region while bounding memory for pathological input. It applies until the
+// terminal height is known (see rowWindow.setLimit), and caps it after.
 const maxPendingRows = 500
 
 // pendingRow is one committed terminal row buffered in memory, not yet
@@ -22,19 +23,56 @@ type pendingRow struct {
 // rowWindow holds the most recently committed rows in memory, where cursor
 // movement can still rewrite them, and writes rows to out once they scroll
 // out of reach.
+//
+// Rows held here are not yet in the log file, so a crash (SIGKILL, OOM, power
+// loss) loses them. The window is therefore no larger than needed: cursor-up
+// cannot move above the top of the screen, so once the terminal height is
+// known only that many rows stay in memory.
 type rowWindow struct {
 	out    io.Writer
+	limit  int // terminal height in rows; 0 until known
 	rows   []pendingRow
 	cursor int // index into rows the next commit lands on; == len(rows) means "new row"
+}
+
+// capacity returns how many committed rows the window may hold.
+func (w *rowWindow) capacity() int {
+	if w.limit > 0 {
+		return min(w.limit, maxPendingRows)
+	}
+	return maxPendingRows
+}
+
+// setLimit sizes the window to a terminal of the given height and writes out
+// any rows that no longer fit. A row that has scrolled off the top of the
+// screen can no longer be reached by cursor movement, so keeping it in
+// memory would only put it at risk.
+func (w *rowWindow) setLimit(rows int) error {
+	if rows <= 0 {
+		return nil
+	}
+	w.limit = rows
+	return w.trim()
+}
+
+// trim writes out the oldest rows until the window is within capacity.
+func (w *rowWindow) trim() error {
+	for len(w.rows) > w.capacity() {
+		if err := w.write(w.rows[0]); err != nil {
+			return err
+		}
+		w.rows = w.rows[1:]
+		w.cursor = max(w.cursor-1, 0)
+	}
+	return nil
 }
 
 // commit places row at the current cursor position within the window: if
 // the cursor was moved up via CSI A (cursor points at an already-buffered
 // row), it overwrites that row in place — the redraw simply replaces the
 // stale frame instead of duplicating it — otherwise it appends a new row.
-// Rows that scroll off the top of the window (beyond maxPendingRows) are
-// written out in order, since a live-redraw region is never that tall in
-// practice.
+// Rows that scroll off the top of the window (beyond its capacity) are
+// written out in order, since a redraw can no longer reach them.
 func (w *rowWindow) commit(row pendingRow) error {
 	if w.cursor < len(w.rows) {
 		w.rows[w.cursor] = row
@@ -42,14 +80,7 @@ func (w *rowWindow) commit(row pendingRow) error {
 		w.rows = append(w.rows, row)
 	}
 	w.cursor++
-	for len(w.rows) > maxPendingRows {
-		if err := w.write(w.rows[0]); err != nil {
-			return err
-		}
-		w.rows = w.rows[1:]
-		w.cursor--
-	}
-	return nil
+	return w.trim()
 }
 
 // up moves the cursor up n rows (CSI A) so the next commit overwrites a
