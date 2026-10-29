@@ -2,6 +2,8 @@ package notifier
 
 import (
 	"bytes"
+	"compress/gzip"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -72,6 +74,7 @@ func TestTruncate(t *testing.T) {
 		{"short unchanged", "hello", 10, "hello"},
 		{"exact limit", "hello", 5, "hello"},
 		{"long truncated", "abcdefgh", 3, "...(truncated)...\nfgh"},
+		{"cut starts at a rune boundary", "あいう", 4, "...(truncated)...\nう"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -212,5 +215,108 @@ func TestSlackNotifyEndFileError(t *testing.T) {
 	err := s.NotifyEnd("/nonexistent/path/file.log", "cmd", 0, time.Second)
 	if err == nil {
 		t.Error("expected error for missing log file, got nil")
+	}
+}
+
+const secretLog = "# kuroko session log\n" +
+	"export AWS_ACCESS_KEY_ID=AKIAABCDEFGHIJKLMNOP\n" +
+	"echo '```'\n" +
+	"done\n"
+
+// writeGzipLog writes content as a compressed log, as compress_on_close does.
+func writeGzipLog(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "session.log.gz")
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write([]byte(content)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestDiscordNotifyEndSendsRedactedTextOfCompressedLog(t *testing.T) {
+	logPath := writeGzipLog(t, secretLog)
+
+	var filename string
+	var attachment []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Errorf("ParseMultipartForm: %v", err)
+			return
+		}
+		f, header, err := r.FormFile("files[0]")
+		if err != nil {
+			t.Errorf("FormFile: %v", err)
+			return
+		}
+		defer f.Close()
+		filename = header.Filename
+		attachment, _ = io.ReadAll(f)
+	}))
+	defer srv.Close()
+
+	d := &discordNotifier{webhookURL: srv.URL}
+	if err := d.NotifyEnd(logPath, "env AWS_ACCESS_KEY_ID=AKIAABCDEFGHIJKLMNOP ssh host", 0, time.Second); err != nil {
+		t.Fatalf("NotifyEnd() = %v", err)
+	}
+	if filename != "session.log" {
+		t.Errorf("attachment name = %q; want the decompressed name session.log", filename)
+	}
+	if !strings.HasPrefix(string(attachment), "# kuroko session log") {
+		t.Errorf("attachment is not the decompressed text: %q", attachment)
+	}
+	if strings.Contains(string(attachment), "AKIAABCDEFGHIJKLMNOP") || !strings.Contains(string(attachment), "[AWS_ACCESS_KEY_REDACTED]") {
+		t.Errorf("attachment was not redacted:\n%s", attachment)
+	}
+}
+
+func TestSlackNotifyEndSendsRedactedTextOfCompressedLog(t *testing.T) {
+	logPath := writeGzipLog(t, secretLog)
+
+	var payload struct{ Text string }
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decoding payload: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	s := &slackNotifier{webhookURL: srv.URL}
+	if err := s.NotifyEnd(logPath, "env AWS_ACCESS_KEY_ID=AKIAABCDEFGHIJKLMNOP ssh host", 0, time.Second); err != nil {
+		t.Fatalf("NotifyEnd() = %v", err)
+	}
+	if !strings.Contains(payload.Text, "# kuroko session log") {
+		t.Errorf("message does not carry the decompressed log text: %q", payload.Text)
+	}
+	if strings.Contains(payload.Text, "AKIAABCDEFGHIJKLMNOP") {
+		t.Errorf("message was not redacted: %q", payload.Text)
+	}
+	// Only the code block's own fences remain; the log's ``` is defused.
+	if got := strings.Count(payload.Text, "```"); got != 2 {
+		t.Errorf("message has %d ``` fences; want 2: %q", got, payload.Text)
+	}
+}
+
+func TestNotifyStartRedactsCommand(t *testing.T) {
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+	}))
+	defer srv.Close()
+
+	for _, n := range []Notifier{&discordNotifier{webhookURL: srv.URL}, &slackNotifier{webhookURL: srv.URL}} {
+		if err := n.NotifyStart("curl -H 'Authorization: Bearer s3cr3t-token' https://api"); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(body), "s3cr3t-token") {
+			t.Errorf("%T sent the token: %s", n, body)
+		}
 	}
 }

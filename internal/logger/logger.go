@@ -73,7 +73,9 @@ func New(logDir string, args []string, redactionEnabled bool) (*Logger, error) {
 		term:         newTerminal(f, redactionEnabled, isNetworkSessionCommand(args)),
 	}
 
-	if os.Getenv("KUROKO_RAW_DEBUG") == "1" {
+	// The raw debug file holds the PTY stream before redaction, so it is
+	// never written while redaction is enabled.
+	if os.Getenv("KUROKO_RAW_DEBUG") == "1" && !redactionEnabled {
 		rawPath := path + ".raw"
 		rf, err := os.OpenFile(rawPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 		if err == nil {
