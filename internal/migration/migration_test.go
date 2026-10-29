@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ryu/kuroko/internal/config"
-	"github.com/ryu/kuroko/internal/logstore"
+	"github.com/nagayon-935/kuroko/internal/config"
+	"github.com/nagayon-935/kuroko/internal/logstore"
 )
 
 func put(t *testing.T, path string, data []byte) {

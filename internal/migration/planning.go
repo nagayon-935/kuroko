@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/ryu/kuroko/internal/config"
-	"github.com/ryu/kuroko/internal/logger"
-	"github.com/ryu/kuroko/internal/logstore"
+	"github.com/nagayon-935/kuroko/internal/config"
+	"github.com/nagayon-935/kuroko/internal/logger"
+	"github.com/nagayon-935/kuroko/internal/logstore"
 )
 
 // A plan owns the complete list of sources and destinations before copying.

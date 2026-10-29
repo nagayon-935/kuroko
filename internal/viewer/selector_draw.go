@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ryu/kuroko/internal/textwidth"
-	"github.com/ryu/kuroko/internal/tui"
+	"github.com/nagayon-935/kuroko/internal/textwidth"
+	"github.com/nagayon-935/kuroko/internal/tui"
 )
 
 func (s *LogSelector) draw() {

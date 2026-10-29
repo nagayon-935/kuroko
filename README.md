@@ -56,6 +56,12 @@ make install
 
 `~/.local/bin/kuroko` にバイナリが配置されます。PATH の設定は上記と同様です。
 
+`go install` でも導入できます。バイナリは `$(go env GOPATH)/bin` に配置されます。
+
+```bash
+go install github.com/nagayon-935/kuroko/cmd/kuroko@latest
+```
+
 ## 使い方
 
 ```

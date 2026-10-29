@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 
-	"github.com/ryu/kuroko/internal/config"
+	"github.com/nagayon-935/kuroko/internal/config"
 )
 
 type legacySettings struct {

@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ryu/kuroko/internal/logstore"
+	"github.com/nagayon-935/kuroko/internal/logstore"
 )
 
 // Logger writes session output to a file as human-readable plain text.

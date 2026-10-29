@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/ryu/kuroko/internal/tui"
+	"github.com/nagayon-935/kuroko/internal/tui"
 )
 
 func (s *LogSelector) loop() error {

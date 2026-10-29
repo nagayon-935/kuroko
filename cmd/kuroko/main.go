@@ -5,17 +5,27 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 
-	"github.com/ryu/kuroko/internal/completion"
-	"github.com/ryu/kuroko/internal/config"
-	"github.com/ryu/kuroko/internal/console"
-	"github.com/ryu/kuroko/internal/launcher"
-	"github.com/ryu/kuroko/internal/session"
-	"github.com/ryu/kuroko/internal/viewer"
+	"github.com/nagayon-935/kuroko/internal/completion"
+	"github.com/nagayon-935/kuroko/internal/config"
+	"github.com/nagayon-935/kuroko/internal/console"
+	"github.com/nagayon-935/kuroko/internal/launcher"
+	"github.com/nagayon-935/kuroko/internal/session"
+	"github.com/nagayon-935/kuroko/internal/viewer"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=v1.2.3"
 var version = "dev"
+
+func init() {
+	// `go install github.com/nagayon-935/kuroko/cmd/kuroko@v1.2.3` sets no
+	// ldflags, but records the module version in the binary.
+	if info, ok := debug.ReadBuildInfo(); ok && version == "dev" &&
+		info.Main.Version != "" && info.Main.Version != "(devel)" {
+		version = info.Main.Version
+	}
+}
 
 const usage = `kuroko — transparent terminal session logger
 

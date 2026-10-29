@@ -3,7 +3,7 @@ package logger
 import (
 	"bytes"
 
-	"github.com/ryu/kuroko/internal/textwidth"
+	"github.com/nagayon-935/kuroko/internal/textwidth"
 )
 
 // wideContinuation marks the second terminal column occupied by an East
