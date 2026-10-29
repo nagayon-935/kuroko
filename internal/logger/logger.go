@@ -199,12 +199,50 @@ func IsShellPrompt(p []byte) bool {
 	return true
 }
 
+// maxPromptLen bounds how far into a line SplitPrompt looks for the end of a
+// prompt. Real prompts, even ones showing a long working directory, are far
+// shorter. The bound keeps detection cheap on very long output lines
+// (minified JSON, base64 dumps), which are scanned on the PTY copy path where
+// any delay stalls the user's terminal.
+const maxPromptLen = 1024
+
+var (
+	heavyArrowIndicator = []byte("❯")
+	arrowIndicator      = []byte("➔")
+)
+
+// isTwoBytePromptIndicator reports whether tail is one of the two-byte
+// prompt endings IsShellPrompt recognises.
+func isTwoBytePromptIndicator(tail []byte) bool {
+	return len(tail) == 2 && tail[1] == ' ' &&
+		(tail[0] == '$' || tail[0] == '#' || tail[0] == '%' || tail[0] == '>')
+}
+
 // SplitPrompt checks if line starts with a valid shell prompt prefix.
-// If so, it returns the prompt prefix and the remaining command.
-// Otherwise, it returns nil, nil.
+// If so, it returns the shortest such prompt prefix and the remaining
+// command. Otherwise, it returns nil, nil.
+//
+// It returns the same result as testing IsShellPrompt on every prefix in
+// turn, but only tests the prefixes that can match. IsShellPrompt needs an
+// indicator: the prefix ends in "$ ", "# ", "% " or "> ", or it contains ❯ or
+// ➔. A prefix that ends elsewhere can only match through an arrow it
+// contains, and then the result depends only on the text before the first
+// arrow, so the shortest prefix past each arrow stands for all the others.
+// This keeps the scan linear in the line length instead of quadratic.
 func SplitPrompt(line []byte) ([]byte, []byte) {
-	for i := 1; i <= len(line); i++ {
-		if IsShellPrompt(line[:i]) {
+	head := line[:min(len(line), maxPromptLen)]
+	heavyEnd, arrowEnd := -1, -1
+	if idx := bytes.Index(head, heavyArrowIndicator); idx >= 0 {
+		heavyEnd = idx + len(heavyArrowIndicator)
+	}
+	if idx := bytes.Index(head, arrowIndicator); idx >= 0 {
+		arrowEnd = idx + len(arrowIndicator)
+	}
+	for i := 2; i <= len(head); i++ {
+		if i != heavyEnd && i != arrowEnd && !isTwoBytePromptIndicator(head[i-2:i]) {
+			continue
+		}
+		if IsShellPrompt(head[:i]) {
 			return line[:i], line[i:]
 		}
 	}
