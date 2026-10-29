@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/ryu/kuroko/internal/completion"
@@ -56,8 +57,16 @@ Environment variables:
 `
 
 func main() {
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+// run executes kuroko with the command-line arguments args (without the
+// program name) and returns the process exit code. It is split from main so
+// the dispatch can be tested without exiting the process.
+func run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("kuroko", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
+	fs.SetOutput(stderr)
+	fs.Usage = func() { fmt.Fprint(stderr, usage) }
 
 	var logDir string
 	fs.StringVar(&logDir, "log-dir", "", "")
@@ -69,17 +78,17 @@ func main() {
 	fs.BoolVar(&showVersion, "version", false, "")
 	fs.BoolVar(&showVersion, "v", false, "")
 
-	if err := fs.Parse(os.Args[1:]); err != nil {
-		os.Exit(1)
+	if err := fs.Parse(args); err != nil {
+		return 1
 	}
 
 	if showHelp {
-		fmt.Print(usage)
-		os.Exit(0)
+		fmt.Fprint(stdout, usage)
+		return 0
 	}
 	if showVersion {
-		fmt.Println("kuroko " + version)
-		os.Exit(0)
+		fmt.Fprintln(stdout, "kuroko "+version)
+		return 0
 	}
 
 	rest := fs.Args()
@@ -87,83 +96,84 @@ func main() {
 		var err error
 		rest, err = launcher.Run()
 		if err != nil {
-			fatalf("connection selection: %v", err)
+			return fail("connection selection: %v", err)
 		}
 		if len(rest) == 0 {
-			return // selection cancelled
+			return 0 // selection cancelled
 		}
 	}
 
 	// Built-in sub-commands (after flag parsing)
 	switch rest[0] {
 	case "help":
-		fmt.Print(usage)
-		os.Exit(0)
+		fmt.Fprint(stdout, usage)
+		return 0
 	case "logs":
-		if err := runLogs(rest[1:], logDir, os.Stdout, os.Stderr); err != nil {
-			fatalf("logs error: %v", err)
+		if err := runLogs(rest[1:], logDir, stdout, stderr); err != nil {
+			return fail("logs error: %v", err)
 		}
-		os.Exit(0)
+		return 0
 	case "migrate":
-		if err := runMigration(rest[1:], os.Stdout, os.Stderr); err != nil {
-			fatalf("migration error: %v", err)
+		if err := runMigration(rest[1:], stdout, stderr); err != nil {
+			return fail("migration error: %v", err)
 		}
-		os.Exit(0)
+		return 0
 	case "view":
 		path, err := resolveLogArgument(rest[1:], logDir)
 		if err != nil {
-			fatalf("view error: %v", err)
+			return fail("view error: %v", err)
 		}
 		if err := viewer.Run(path); err != nil {
-			fatalf("viewer error: %v", err)
+			return fail("viewer error: %v", err)
 		}
-		os.Exit(0)
+		return 0
 	case "export":
-		if err := runExport(rest[1:], logDir, os.Stdout, os.Stderr); err != nil {
-			fatalf("export error: %v", err)
+		if err := runExport(rest[1:], logDir, stdout, stderr); err != nil {
+			return fail("export error: %v", err)
 		}
-		os.Exit(0)
+		return 0
 	case "completion":
 		shell := "bash"
 		if len(rest) >= 2 {
 			shell = rest[1]
 		}
-		if err := completion.WriteScript(os.Stdout, shell); err != nil {
-			fatalf("completion error: %v", err)
+		if err := completion.WriteScript(stdout, shell); err != nil {
+			return fail("completion error: %v", err)
 		}
-		os.Exit(0)
+		return 0
 	case "__complete":
 		// Hidden helper invoked by the shell completion script; not
 		// listed in usage. rest[1:] is the already-typed context
 		// (kuroko itself and the word under the cursor excluded).
 		cfg, err := config.Resolve(config.Options{LogDir: logDir})
 		if err != nil {
-			os.Exit(0) // completion must never surface errors to the shell
+			return 0 // completion must never surface errors to the shell
 		}
 		for _, c := range completion.Candidates(rest[1:], cfg) {
-			fmt.Println(c)
+			fmt.Fprintln(stdout, c)
 		}
-		os.Exit(0)
+		return 0
 	}
 
 	cfg, err := config.Load(config.Options{LogDir: logDir})
 	if err != nil {
-		fatalf("config error: %v", err)
+		return fail("config error: %v", err)
 	}
 
 	sess, err := session.New(cfg, rest)
 	if err != nil {
-		fatalf("session error: %v", err)
+		return fail("session error: %v", err)
 	}
 
 	exitCode, err := sess.Run()
 	if err != nil {
 		console.Errorf("error: %v", err)
 	}
-	os.Exit(exitCode)
+	return exitCode
 }
 
-func fatalf(format string, args ...any) {
+// fail reports an error and returns the exit code for it.
+func fail(format string, args ...any) int {
 	console.Errorf(format, args...)
-	os.Exit(1)
+	return 1
 }

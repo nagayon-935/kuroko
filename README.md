@@ -20,8 +20,12 @@ ARCH=$(uname -m); case "$ARCH" in x86_64) ARCH=amd64 ;; aarch64|arm64) ARCH=arm6
 URL=$(curl -fsSL https://api.github.com/repos/nagayon-935/kuroko/releases/latest \
   | grep -o "https://[^\"]*_${OS}_${ARCH}.tar.gz")
 
+# アーカイブを取得し、リリースのチェックサムと一致した場合だけ展開
+# （shasum がない環境では shasum -a 256 を sha256sum に置き換えてください）
+FILE=${URL##*/}
 curl -fLO "$URL"
-tar xzf "kuroko_"*"_${OS}_${ARCH}.tar.gz" kuroko
+curl -fsSL "${URL%/*}/checksums.txt" | grep " ${FILE}\$" | shasum -a 256 -c \
+  && tar xzf "$FILE" kuroko
 
 mkdir -p ~/.local/bin
 mv kuroko ~/.local/bin/
