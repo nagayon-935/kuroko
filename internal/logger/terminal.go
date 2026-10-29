@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"time"
@@ -18,10 +19,9 @@ type terminal struct {
 	prompts  promptTracker
 	redactor *redactor // nil when redaction is disabled
 
-	pendingCR bool   // \r was the last control char seen; defer reset until next char
-	inEsc     bool   // true if currently parsing an ANSI escape sequence
-	escBuf    []byte // buffer for the current escape sequence
-	runeBuf   []byte // incomplete UTF-8 rune carried across feed calls
+	pendingCR bool         // \r was the last control char seen; defer reset until next char
+	esc       escapeParser // escape sequence in progress, possibly split across feed calls
+	runeBuf   []byte       // incomplete UTF-8 rune carried across feed calls
 }
 
 func newTerminal(out io.Writer, redactionEnabled, networkMode bool) *terminal {
@@ -57,13 +57,9 @@ func newTerminal(out io.Writer, redactionEnabled, networkMode bool) *terminal {
 // preserved.
 func (t *terminal) feed(data []byte) error {
 	for _, b := range data {
-		if t.inEsc {
-			t.escBuf = append(t.escBuf, b)
-			if isCompleteEscape(t.escBuf) || len(t.escBuf) > 64 {
-				t.inEsc = false
-				if len(t.escBuf) <= 64 {
-					t.handleEscape(t.escBuf)
-				}
+		if t.esc.active() {
+			if seq, done := t.esc.feed(b); done {
+				t.handleEscape(seq)
 			}
 			continue
 		}
@@ -71,8 +67,7 @@ func (t *terminal) feed(data []byte) error {
 			if t.pendingCR {
 				t.snapshotLine()
 			}
-			t.inEsc = true
-			t.escBuf = []byte{b}
+			t.esc.start()
 			continue
 		}
 
@@ -150,13 +145,37 @@ func (t *terminal) snapshotLine() {
 	t.pendingCR = false
 }
 
-// handleEscape applies the CSI sequences that affect what the log records;
-// everything else (colors, OSC titles, two-char codes, …) is dropped.
-func (t *terminal) handleEscape(seq []byte) {
-	if len(seq) < 3 || seq[1] != '[' {
-		return // Ignore non-CSI sequences (like OSC title or two-char codes)
+// handleEscape applies the sequences that affect what the log records: CSI
+// cursor and erase controls, and OSC 133 prompt marks. Everything else
+// (colors, titles, hyperlinks, charset switches, …) is dropped.
+func (t *terminal) handleEscape(seq escapeSeq) {
+	switch seq.kind {
+	case '[':
+		t.handleCSI(seq.data)
+	case ']':
+		t.handleOSC(seq.data)
 	}
+}
 
+// handleOSC applies OSC 133 semantic prompt marks (the FinalTerm shell
+// integration protocol emitted by fish, VS Code, WezTerm, iTerm2, kitty,
+// Ghostty and the snippets in the README): "A" starts a prompt and "B" ends
+// it, so the text between them is known to be the prompt without guessing.
+func (t *terminal) handleOSC(payload []byte) {
+	mark, ok := bytes.CutPrefix(payload, []byte("133;"))
+	if !ok || len(mark) == 0 {
+		return
+	}
+	switch mark[0] {
+	case 'A':
+		t.prompts.clearMark()
+	case 'B':
+		t.prompts.markPromptEnd(t.line.text())
+	}
+}
+
+// handleCSI applies a complete CSI sequence (seq starts with ESC [).
+func (t *terminal) handleCSI(seq []byte) {
 	final := seq[len(seq)-1]
 	params := string(seq[2 : len(seq)-1])
 	n := csiCount(params)

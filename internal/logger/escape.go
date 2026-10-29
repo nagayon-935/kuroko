@@ -38,8 +38,12 @@ func normalizeLineEndings(p []byte) []byte {
 }
 
 // incompleteEscapePrefix returns the number of trailing bytes in data that
-// look like the start of an incomplete ANSI escape sequence.  Those bytes
-// should be buffered and prepended to the next Write call.
+// look like the start of an incomplete CSI sequence.  Those bytes should be
+// buffered and prepended to the next Write call, so that the alternate-screen
+// switches (which are CSI sequences) are found even when a write splits them.
+// Other sequences need no buffering: the terminal's escapeParser carries any
+// sequence across writes by itself, and holding back an OSC tail here would
+// only delay the text after it.
 func incompleteEscapePrefix(data []byte) int {
 	const maxScan = 32
 	start := len(data) - maxScan
@@ -51,10 +55,10 @@ func incompleteEscapePrefix(data []byte) int {
 			continue
 		}
 		tail := data[i:]
-		if isCompleteEscape(tail) {
-			break // complete sequence at the end — nothing to buffer
+		if len(tail) == 1 || (tail[1] == '[' && !isCompleteEscape(tail)) {
+			return len(tail)
 		}
-		return len(tail)
+		return 0
 	}
 	return 0
 }
@@ -73,9 +77,9 @@ func isCompleteEscape(seq []byte) bool {
 			}
 		}
 		return false
-	case ']': // OSC — terminated by BEL or ESC
-		for _, c := range seq[2:] {
-			if c == 0x07 || c == 0x1b {
+	case ']': // OSC — terminated by BEL or ST (ESC \)
+		for i, c := range seq[2:] {
+			if c == 0x07 || (c == 0x1b && i+3 < len(seq) && seq[i+3] == '\\') {
 				return true
 			}
 		}
@@ -103,4 +107,122 @@ func csiCount(params string) int {
 		return val
 	}
 	return 1
+}
+
+type escState uint8
+
+const (
+	escGround       escState = iota // not inside an escape sequence
+	escStart                        // saw ESC
+	escIntermediate                 // ESC followed by intermediate bytes, e.g. "ESC (" of ESC ( B
+	escCSI                          // ESC [ … up to a final byte
+	escString                       // OSC/DCS/SOS/PM/APC payload, up to BEL or ST
+	escStringEsc                    // saw ESC inside a string: ST if '\' follows
+)
+
+const (
+	maxCSILen    = 64  // longer CSI sequences are consumed but not applied
+	maxStringLen = 256 // longer OSC/DCS payloads are consumed; only this prefix is kept
+)
+
+// escapeSeq is one complete escape sequence that may affect the log.
+type escapeSeq struct {
+	kind byte   // '[' for CSI, ']' for OSC, 'P'/'X'/'^'/'_' for DCS/SOS/PM/APC; 0 otherwise
+	data []byte // CSI: the whole sequence from ESC; strings: the payload
+}
+
+// escapeParser consumes escape sequences from the PTY stream the way xterm
+// does, so none of their bytes leak into the log as text:
+//   - CSI: ESC [ parameters final, the final byte in 0x40–0x7E
+//   - OSC, DCS, SOS, PM, APC: ESC ] / P / X / ^ / _ payload, ended by BEL or
+//     ST (ESC \); an ESC followed by anything else aborts the string and
+//     starts a new sequence, and CAN/SUB cancel it
+//   - nF: ESC, intermediates (0x20–0x2F), final, e.g. ESC ( B from tput sgr0
+//   - two-byte: ESC final, e.g. ESC M or ESC =
+//
+// A sequence may be split across any number of writes.
+type escapeParser struct {
+	state escState
+	kind  byte
+	buf   []byte
+}
+
+func (p *escapeParser) active() bool { return p.state != escGround }
+
+// start begins a sequence; the caller has just seen ESC.
+func (p *escapeParser) start() {
+	p.state = escStart
+	p.buf = p.buf[:0]
+}
+
+// feed consumes the next byte of the active sequence and reports whether
+// the sequence ended with it. The returned data is only valid until the
+// next call.
+func (p *escapeParser) feed(b byte) (escapeSeq, bool) {
+	switch p.state {
+	case escStart:
+		switch {
+		case b == 0x1b:
+			p.start()
+		case b == 0x18 || b == 0x1a:
+			p.state = escGround
+			return escapeSeq{}, true
+		case b == '[':
+			p.state, p.kind = escCSI, b
+			p.buf = append(p.buf[:0], 0x1b, b)
+		case b == ']' || b == 'P' || b == 'X' || b == '^' || b == '_':
+			p.state, p.kind = escString, b
+			p.buf = p.buf[:0]
+		case b >= 0x20 && b <= 0x2f:
+			p.state = escIntermediate
+		default:
+			p.state = escGround
+			return escapeSeq{}, true
+		}
+	case escIntermediate:
+		if b < 0x20 || b > 0x2f {
+			p.state = escGround
+			return escapeSeq{}, true
+		}
+	case escCSI:
+		switch {
+		case b == 0x1b:
+			p.start()
+		case b == 0x18 || b == 0x1a:
+			p.state = escGround
+			return escapeSeq{}, true
+		case b >= 0x40 && b <= 0x7e:
+			p.state = escGround
+			if len(p.buf) >= maxCSILen {
+				return escapeSeq{}, true
+			}
+			p.buf = append(p.buf, b)
+			return escapeSeq{kind: '[', data: p.buf}, true
+		case b >= 0x20 && len(p.buf) < maxCSILen:
+			p.buf = append(p.buf, b)
+		}
+	case escString:
+		switch b {
+		case 0x07:
+			p.state = escGround
+			return escapeSeq{kind: p.kind, data: p.buf}, true
+		case 0x1b:
+			p.state = escStringEsc
+		case 0x18, 0x1a:
+			p.state = escGround
+			return escapeSeq{}, true
+		default:
+			if len(p.buf) < maxStringLen {
+				p.buf = append(p.buf, b)
+			}
+		}
+	case escStringEsc:
+		if b == '\\' {
+			p.state = escGround
+			return escapeSeq{kind: p.kind, data: p.buf}, true
+		}
+		p.start()
+		return p.feed(b)
+	}
+	return escapeSeq{}, false
 }

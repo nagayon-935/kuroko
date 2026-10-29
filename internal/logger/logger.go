@@ -179,6 +179,14 @@ func (l *Logger) doClose(exitCode int) (err error) {
 		}
 	}()
 
+	// Output held back as a possibly split escape sequence will not be
+	// completed any more; pass it on so trailing text is not lost.
+	if len(l.seqBuf) > 0 {
+		if err := l.writeFiltered(l.seqBuf); err != nil {
+			return err
+		}
+		l.seqBuf = nil
+	}
 	// The session is ending, so no further redraw can occur: write out every
 	// row still held for one, including an unterminated last line.
 	if err := l.term.finish(); err != nil {

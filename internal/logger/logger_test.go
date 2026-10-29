@@ -1051,6 +1051,7 @@ func TestIsCompleteEscape(t *testing.T) {
 	}{
 		{"OSC with BEL", []byte("\x1b]0;title\x07"), true},
 		{"OSC with ESC ST", []byte("\x1b]0;title\x1b\\"), true},
+		{"OSC with bare ESC is incomplete", []byte("\x1b]0;title\x1b"), false},
 		{"OSC incomplete", []byte("\x1b]0;title"), false},
 		{"two-char ESC M", []byte("\x1bM"), true},
 		{"two-char only ESC", []byte("\x1b"), false},

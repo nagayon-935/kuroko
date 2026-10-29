@@ -138,10 +138,43 @@ func SplitPrompt(line []byte) ([]byte, []byte) {
 // carry their prompt directly, but readline's accept-line redraw erases the
 // prompt and reprints only the bare command just before running it, so the
 // tracker also remembers the last prompt it saw to restore it.
+//
+// When the shell marks its prompt with OSC 133 (see terminal.handleOSC), the
+// marked prompt is used for that row instead of the heuristics, so prompts
+// the heuristics cannot recognise ("λ ", "→ ", custom themes) still produce
+// command entries. Rows without marks, such as those from a remote shell
+// reached through ssh, fall back to the heuristics.
 type promptTracker struct {
 	networkMode  bool   // also recognise NW device prompts (ssh/telnet/screen/…)
 	savedLine    []byte // prompt+command snapshot taken at the first bare \r before any overwrite
 	storedPrompt []byte // last verified shell prompt; used to recover from readline history contamination
+	marked       bool   // the current row carries an OSC 133 prompt-end mark
+	markedPrompt []byte // the row's text up to that mark: the prompt itself
+}
+
+// markPromptEnd records that the current row's text up to the cursor, line,
+// is the prompt (OSC 133;B).
+func (p *promptTracker) markPromptEnd(line []byte) {
+	p.marked = true
+	p.markedPrompt = append(p.markedPrompt[:0], line...)
+}
+
+// clearMark forgets the current row's prompt mark (a new prompt began).
+func (p *promptTracker) clearMark() { p.marked = false }
+
+// classifyMarked is classify for a row whose prompt was marked by OSC 133.
+func (p *promptTracker) classifyMarked(out []byte) ([]byte, bool) {
+	prompt := p.markedPrompt
+	p.storedPrompt = append(p.storedPrompt[:0], prompt...)
+	if cmd, ok := bytes.CutPrefix(out, prompt); ok {
+		return out, len(bytes.TrimSpace(cmd)) > 0
+	}
+	if len(out) == 0 {
+		return append([]byte{}, prompt...), false
+	}
+	// readline's accept-line redraw overwrote the prompt with the bare
+	// command; put the marked prompt back in front of it.
+	return append(append([]byte{}, prompt...), out...), true
 }
 
 // snapshot records line as the pre-overwrite row when it carries a prompt.
@@ -158,6 +191,9 @@ func (p *promptTracker) snapshot(line []byte) {
 // classify returns the text to record for the committed row out, with the
 // prompt restored if a redraw erased it, and whether the row is a command.
 func (p *promptTracker) classify(out []byte) ([]byte, bool) {
+	if p.marked {
+		return p.classifyMarked(out)
+	}
 	var hasCommand bool
 	if prompt, cmd := SplitPrompt(out); prompt != nil {
 		// Case 1: Shell prompt (bash/zsh/…).
@@ -178,12 +214,20 @@ func (p *promptTracker) classify(out []byte) ([]byte, bool) {
 	return out, hasCommand
 }
 
-// lineCommitted forgets the snapshot of the row that was just committed.
-func (p *promptTracker) lineCommitted() { p.savedLine = nil }
+// lineCommitted forgets the snapshot and prompt mark of the row that was
+// just committed.
+func (p *promptTracker) lineCommitted() {
+	p.savedLine = nil
+	p.marked = false
+}
 
 // finalLine returns the text to record for a row left unterminated when the
 // session ends, applying the same prompt recovery as classify.
 func (p *promptTracker) finalLine(out []byte) []byte {
+	if p.marked {
+		out, _ = p.classifyMarked(out)
+		return out
+	}
 	if prompt, _ := SplitPrompt(out); prompt == nil {
 		out, _ = p.restoreSavedPrompt(out)
 	}
