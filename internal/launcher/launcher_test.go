@@ -110,7 +110,7 @@ func TestSerialDevices(t *testing.T) {
 		t.Fatal(err)
 	}
 	var want []string
-	for _, name := range []string{"tty.usbmodem", "tty.usbserial"} {
+	for _, name := range []string{"tty.usbmodem", "tty.usbserial", "ttyACM0", "ttyUSB0"} {
 		want = append(want, filepath.Join(root, name))
 	}
 	if !reflect.DeepEqual(got, want) {
