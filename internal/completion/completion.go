@@ -31,11 +31,19 @@ var exitFlagNames = map[string]bool{"help": true, "h": true, "version": true, "v
 // shells are the shell names accepted by `kuroko completion <shell>`.
 var shells = []string{"bash", "zsh", "fish"}
 
+// builtins are the subcommand words main handles itself; any other first
+// non-flag word is a command for kuroko to wrap.
+var builtins = map[string]bool{
+	"logs": true, "view": true, "export": true, "migrate": true,
+	"help": true, "completion": true, "__complete": true,
+}
+
 // Candidates returns the completion candidates for the word currently being
 // typed, given ctx: the previously-typed words (kuroko itself and the word
 // under the cursor already excluded). cfg supplies the default log
-// directory, which ctx may override via -d/--log-dir.
-func Candidates(ctx []string, cfg *config.Config) []string {
+// directory, which ctx may override via -d/--log-dir. home is the user's
+// home directory, used to find ~/.ssh/config; "" skips it.
+func Candidates(ctx []string, cfg *config.Config, home string) []string {
 	p := parseContext(ctx)
 	if p.exits {
 		return nil
@@ -72,15 +80,17 @@ func Candidates(ctx []string, cfg *config.Config) []string {
 		}
 		return append([]string{}, shells...)
 	default:
-		// logs/help take no arguments; any other word is a wrapped
-		// command (e.g. ssh, bash) whose own arguments are out of scope.
-		return nil
+		if builtins[p.sub] {
+			return nil // help/__complete take no completable arguments
+		}
+		return wrappedCandidates(p.sub, p.args, home)
 	}
 }
 
 // parsedContext is what main's flag parsing would make of ctx.
 type parsedContext struct {
 	sub            string   // first non-flag word; "" if none yet
+	subIndex       int      // index of sub in ctx; meaningful only if sub != ""
 	args           []string // words after sub
 	logDirOverride string   // last -d/--log-dir value; "" = use config
 	exits          bool     // a help/version flag makes main exit early
@@ -100,10 +110,10 @@ func parseContext(ctx []string) parsedContext {
 		tok := ctx[i]
 
 		if tok == "--" {
-			return withSub(p, ctx[i+1:])
+			return withSub(p, ctx, i+1)
 		}
 		if !strings.HasPrefix(tok, "-") || tok == "-" {
-			return withSub(p, ctx[i:])
+			return withSub(p, ctx, i)
 		}
 
 		name, value, hasValue := strings.Cut(strings.TrimLeft(tok, "-"), "=")
@@ -131,13 +141,14 @@ func parseContext(ctx []string) parsedContext {
 	return p
 }
 
-// withSub records rest[0] as the subcommand and the remainder as its args.
-func withSub(p parsedContext, rest []string) parsedContext {
-	if len(rest) == 0 {
+// withSub records ctx[i] as the subcommand and the remainder as its args.
+func withSub(p parsedContext, ctx []string, i int) parsedContext {
+	if i >= len(ctx) {
 		return p
 	}
-	p.sub = rest[0]
-	p.args = rest[1:]
+	p.sub = ctx[i]
+	p.subIndex = i
+	p.args = ctx[i+1:]
 	return p
 }
 

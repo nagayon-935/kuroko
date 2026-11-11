@@ -11,6 +11,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/nagayon-935/kuroko/internal/sshconfig"
 	"github.com/nagayon-935/kuroko/internal/tui"
 	"golang.org/x/term"
 )
@@ -82,7 +83,7 @@ func choose(in io.Reader, out io.Writer, home, devRoot string) ([]string, error)
 }
 
 func (p *prompt) ssh(home string) ([]string, error) {
-	hosts, previews, readErr := sshEntries(home)
+	hosts, previews, readErr := sshconfig.Entries(home)
 	p.previews = previews
 	if readErr != nil {
 		p.notice = fmt.Sprintf("Could not read all SSH hosts: %v", readErr)
@@ -94,7 +95,7 @@ func (p *prompt) ssh(home string) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		for !validHost(host) {
+		for !sshconfig.ValidHost(host) {
 			fmt.Fprint(p.out, "Enter a host or user@host without spaces or a leading '-'.\r\n")
 			host, err = p.line("SSH host (Ctrl+B: back, Ctrl+C: cancel): ")
 			if err != nil {
@@ -159,16 +160,6 @@ func (p *prompt) promptBaudRate() (string, error) {
 		}
 		fmt.Fprint(p.out, "Enter a positive numeric baud rate.\r\n")
 	}
-}
-
-func validHost(host string) bool {
-	return host != "" &&
-		utf8.ValidString(host) &&
-		!strings.HasPrefix(host, "-") &&
-		!strings.ContainsAny(host, "*?!") &&
-		!strings.ContainsFunc(host, func(r rune) bool {
-			return unicode.IsSpace(r) || unicode.IsControl(r) || !unicode.IsPrint(r)
-		})
 }
 
 func validDevice(device string) bool {

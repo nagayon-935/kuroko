@@ -33,6 +33,9 @@ type Session struct {
 }
 
 func New(cfg *config.Config, args []string) (*Session, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("no command specified")
+	}
 	log, err := logger.New(cfg.LogDir, args, cfg.Redaction.Enabled)
 	if err != nil {
 		return nil, fmt.Errorf("creating log file: %w", err)
@@ -123,6 +126,15 @@ func (s *Session) runWithPTY() (int, error) {
 		return s.runPlain()
 	}
 
+	// Set raw mode before starting the child so a MakeRaw failure never
+	// leaks a running process and the terminal is ready as soon as the PTY
+	// opens.
+	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		return 1, fmt.Errorf("raw mode: %w", err)
+	}
+	defer term.Restore(int(os.Stdin.Fd()), oldState)
+
 	cmd := exec.Command(s.args[0], s.args[1:]...)
 
 	ptmx, err := pty.Start(cmd)
@@ -134,13 +146,6 @@ func (s *Session) runWithPTY() (int, error) {
 
 	stopResize := forwardResizeSignals(ptmx, s.log.SetScreenRows)
 	defer stopResize()
-
-	// Set raw mode.
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
-	if err != nil {
-		return 1, fmt.Errorf("raw mode: %w", err)
-	}
-	defer term.Restore(int(os.Stdin.Fd()), oldState)
 
 	stopTermHandler := s.handleTerminationSignals(oldState)
 	defer stopTermHandler()
@@ -193,7 +198,10 @@ func forwardResizeSignals(ptmx *os.File, onResize func(rows int)) (stop func()) 
 			}
 		}
 	}()
-	sigWinch <- syscall.SIGWINCH
+	select {
+	case sigWinch <- syscall.SIGWINCH:
+	default:
+	}
 	return func() {
 		signal.Stop(sigWinch)
 		close(sigWinch)
@@ -226,7 +234,9 @@ func (s *Session) handleTerminationSignals(oldState *term.State) (stop func()) {
 // from handleTerminationSignals so the cleanup logic can be unit tested
 // without going through os.Exit.
 func (s *Session) terminateForSignal(sig os.Signal, oldState *term.State) int {
-	_ = term.Restore(int(os.Stdin.Fd()), oldState)
+	if oldState != nil {
+		_ = term.Restore(int(os.Stdin.Fd()), oldState)
+	}
 
 	sysSig, hasSysSig := sig.(syscall.Signal)
 	if s.cmd != nil && s.cmd.Process != nil && hasSysSig {

@@ -33,7 +33,9 @@ func createLogFile(dir, filename string) (*os.File, error) {
 		if err == nil {
 			// Held until Logger.Close; migration and rotation skip open sessions.
 			if lockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); lockErr != nil {
+				name := f.Name()
 				f.Close()
+				_ = os.Remove(name)
 				return nil, lockErr
 			}
 		}

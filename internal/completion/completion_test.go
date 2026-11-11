@@ -130,7 +130,7 @@ func TestCandidates(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := Candidates(tt.ctx, cfg)
+			got := Candidates(tt.ctx, cfg, "")
 			sortedGot := append([]string(nil), got...)
 			sortedWant := append([]string(nil), tt.want...)
 			sort.Strings(sortedGot)
@@ -192,7 +192,7 @@ func TestExportCandidates(t *testing.T) {
 		{[]string{"export", "--last", "--command", "2"}, []string{"--output", "-o"}},
 		{[]string{"export", "--last", "--command", "=", "2", "-o", "out.txt"}, nil},
 	} {
-		got := Candidates(tt.ctx, cfg)
+		got := Candidates(tt.ctx, cfg, "")
 		if !reflect.DeepEqual(got, tt.want) {
 			t.Fatalf("Candidates(%v)=%v; want %v", tt.ctx, got, tt.want)
 		}
@@ -218,7 +218,7 @@ func TestNestedStorageCompletion(t *testing.T) {
 		{[]string{"logs", "--info"}, nil},
 		{[]string{"migrate"}, []string{"--from"}},
 	} {
-		if got := Candidates(tt.ctx, cfg); !reflect.DeepEqual(got, tt.want) {
+		if got := Candidates(tt.ctx, cfg, ""); !reflect.DeepEqual(got, tt.want) {
 			t.Fatalf("Candidates(%v)=%v; want %v", tt.ctx, got, tt.want)
 		}
 	}

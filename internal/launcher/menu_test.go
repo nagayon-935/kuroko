@@ -3,7 +3,6 @@ package launcher
 import (
 	"bytes"
 	"errors"
-	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
@@ -11,27 +10,6 @@ import (
 
 	"github.com/nagayon-935/kuroko/internal/textwidth"
 )
-
-func TestSSHPreviewSources(t *testing.T) {
-	home := t.TempDir()
-	writeConfig(t, home, "config", "Include conf.d/*\nHost router\n  HostName 192.0.2.1\n  User admin\nHost other\n  Port 2222\n")
-	writeConfig(t, home, "conf.d/edge", "Host edge\n  HostName 192.0.2.2\n  IdentityFile ~/.ssh/key\nMatch exec never-run-this\n  User hidden\n")
-	_, previews, err := sshEntries(home)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{filepath.Join(home, ".ssh/config") + ":2", "HostName 192.0.2.1", "User admin"} {
-		if !strings.Contains(previews["router"], want) {
-			t.Errorf("router preview lacks %q: %s", want, previews["router"])
-		}
-	}
-	if strings.Contains(previews["router"], "Port 2222") || strings.Contains(previews["edge"], "User hidden") {
-		t.Fatal("preview includes another block")
-	}
-	if !strings.Contains(previews["edge"], "IdentityFile ~/.ssh/key") {
-		t.Fatal("missing included file values")
-	}
-}
 
 func TestMenuNavigationAndSearch(t *testing.T) {
 	items := []string{"alpha", "backup", "mbq-host", "qa-router"}

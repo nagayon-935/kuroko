@@ -27,6 +27,12 @@ func TestSessionNew(t *testing.T) {
 	}
 }
 
+func TestSessionNewEmptyArgs(t *testing.T) {
+	if _, err := session.New(minimalConfig(t), nil); err == nil {
+		t.Fatal("expected error for empty args, got nil")
+	}
+}
+
 func TestSessionNewBadLogDir(t *testing.T) {
 	// Creating the log fails immediately when the parent does not exist.
 	cfg := &config.Config{LogDir: filepath.Join(t.TempDir(), "no_such_dir")}

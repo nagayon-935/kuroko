@@ -1,20 +1,17 @@
 package logger
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
-)
+	"unicode"
+	"unicode/utf8"
 
-// TargetName returns the human-readable target name for the given command
-// arguments (e.g. hostname for ssh, device for screen, command name otherwise).
-// Alias resolution is included; filenames use the typed address instead.
-func TargetName(args []string) string {
-	_, hostname := TargetDetails(args)
-	return hostname
-}
+	"github.com/nagayon-935/kuroko/internal/sshconfig"
+)
 
 // TargetDetails returns two values:
 //   - address: full connection target as typed (e.g. "admin@router-a")
@@ -73,16 +70,18 @@ func generateFilename(args []string) string {
 	}
 
 	if host != "" && host != cmd {
-		return fmt.Sprintf("%s_%s_%s.log", ts, cmd, sanitize(host))
+		return fmt.Sprintf("%s_%s_%s.log", ts, sanitize(cmd), sanitize(host))
 	}
 	return fmt.Sprintf("%s_%s.log", ts, sanitize(cmd))
 }
 
-// resolveSSHHostname runs "ssh -G <host>" to resolve an alias defined in
+const sshResolveTimeout = 2 * time.Second
+
+// resolveSSHHostname runs "ssh -G -- <host>" to resolve an alias defined in
 // ~/.ssh/config to its actual HostName. Returns the original target if
 // resolution fails or if the hostname is already the canonical name.
 func resolveSSHHostname(target string) string {
-	if target == "" {
+	if target == "" || !sshconfig.ValidHost(target) {
 		return target
 	}
 
@@ -91,8 +90,13 @@ func resolveSSHHostname(target string) string {
 		user = target[:idx+1]
 		host = target[idx+1:]
 	}
+	if !sshconfig.ValidHost(host) {
+		return target
+	}
 
-	out, err := exec.Command("ssh", "-G", host).Output()
+	ctx, cancel := context.WithTimeout(context.Background(), sshResolveTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ssh", "-G", "--", host).Output()
 	if err != nil {
 		return target
 	}
@@ -100,7 +104,7 @@ func resolveSSHHostname(target string) string {
 	for _, line := range strings.Split(string(out), "\n") {
 		if strings.HasPrefix(strings.ToLower(line), "hostname ") {
 			resolved := strings.TrimSpace(line[len("hostname "):])
-			if resolved != "" && resolved != host {
+			if resolved != "" && resolved != host && sshconfig.ValidHost(resolved) {
 				return user + resolved
 			}
 			break
@@ -112,25 +116,24 @@ func resolveSSHHostname(target string) string {
 // extractSSHTarget returns the first non-flag argument (user@host or host).
 func extractSSHTarget(args []string) string {
 	skipNext := false
-	// SSH options that consume the next argument
-	sshOptionArgs := map[string]bool{
-		"-b": true, "-c": true, "-D": true, "-E": true, "-e": true,
-		"-F": true, "-I": true, "-i": true, "-J": true, "-L": true,
-		"-l": true, "-m": true, "-o": true, "-p": true, "-Q": true,
-		"-R": true, "-S": true, "-w": true, "-W": true,
-	}
-	for _, arg := range args {
+	for i, arg := range args {
 		if skipNext {
 			skipNext = false
 			continue
 		}
-		if sshOptionArgs[arg] {
-			skipNext = true
+		if arg == "--" {
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		}
+		if strings.HasPrefix(arg, "-") && arg != "-" {
+			if sshconfig.OptionAwaitsValue(arg[1:]) {
+				skipNext = true
+			}
 			continue
 		}
-		if !strings.HasPrefix(arg, "-") {
-			return arg
-		}
+		return arg
 	}
 	return ""
 }
@@ -146,10 +149,24 @@ func extractScreenTarget(args []string) string {
 	return ""
 }
 
+const maxFilenamePartBytes = 96
+
 func sanitize(s string) string {
 	r := strings.NewReplacer(
 		"/", "_", ":", "_", " ", "_", "\\", "_",
 		"*", "_", "?", "_", "\"", "_", "<", "_", ">", "_", "|", "_",
 	)
-	return r.Replace(s)
+	out := strings.Map(func(c rune) rune {
+		if unicode.IsControl(c) || unicode.Is(unicode.Cf, c) {
+			return '_'
+		}
+		return c
+	}, r.Replace(s))
+	if len(out) > maxFilenamePartBytes {
+		out = out[:maxFilenamePartBytes]
+		for len(out) > 0 && !utf8.ValidString(out) {
+			out = out[:len(out)-1]
+		}
+	}
+	return out
 }

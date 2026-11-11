@@ -102,7 +102,7 @@ func FooterOffset(data []byte) int {
 	if len(lines) != 3 || !strings.HasPrefix(lines[2], "# Exit    : ") {
 		return len(data)
 	}
-	if _, err := time.Parse(time.RFC3339, strings.TrimPrefix(lines[1], "# Ended   : ")); err != nil {
+	if _, err := time.Parse(time.RFC3339, strings.TrimSpace(strings.TrimPrefix(lines[1], "# Ended   : "))); err != nil {
 		return len(data)
 	}
 	if _, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(lines[2], "# Exit    : "))); err != nil {
@@ -124,20 +124,19 @@ func ReadSummary(path string) (Summary, error) {
 	s := parseHeader(head)
 	tail := head
 	if f, ok := r.(*os.File); ok {
-		info, err := f.Stat()
-		if err != nil {
-			return s, err
-		}
-		start := info.Size() - metadataWindow
-		if start < 0 {
-			start = 0
-		}
-		if _, err := f.Seek(start, io.SeekStart); err != nil {
-			return s, err
-		}
-		tail, err = io.ReadAll(io.LimitReader(f, metadataWindow))
-		if err != nil {
-			return s, err
+		if len(head) == metadataWindow {
+			info, err := f.Stat()
+			if err != nil {
+				return s, err
+			}
+			start := max(info.Size()-metadataWindow, 0)
+			if _, err := f.Seek(start, io.SeekStart); err != nil {
+				return s, err
+			}
+			tail, err = io.ReadAll(io.LimitReader(f, metadataWindow))
+			if err != nil {
+				return s, err
+			}
 		}
 	} else {
 		window := &tailWindow{data: append([]byte(nil), head...)}
@@ -148,7 +147,7 @@ func ReadSummary(path string) (Summary, error) {
 	}
 	if i := FooterOffset(tail); i < len(tail) {
 		lines := strings.Split(strings.TrimSpace(string(tail[i:])), "\n")
-		s.Ended, _ = time.Parse(time.RFC3339, strings.TrimPrefix(lines[1], "# Ended   : "))
+		s.Ended, _ = time.Parse(time.RFC3339, strings.TrimSpace(strings.TrimPrefix(lines[1], "# Ended   : ")))
 		code, _ := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(lines[2], "# Exit    : ")))
 		s.ExitCode = &code
 	}

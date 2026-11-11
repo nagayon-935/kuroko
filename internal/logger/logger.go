@@ -54,15 +54,19 @@ func New(logDir string, args []string, redactionEnabled bool) (*Logger, error) {
 	}
 	path := f.Name()
 
+	cmdLine := sanitizeHeaderValue(strings.Join(args, " "), redactionEnabled)
+	targetAddr := sanitizeHeaderValue(TargetAddress(args), redactionEnabled)
+
 	header := fmt.Sprintf(
 		"# kuroko session log\n# Started : %s\n# Command : %s\n# Target  : %s\n# %s\n\n",
 		time.Now().Format(time.RFC3339Nano),
-		strings.Join(args, " "),
-		TargetAddress(args),
+		cmdLine,
+		targetAddr,
 		strings.Repeat("-", 68),
 	)
 	if _, err := f.WriteString(header); err != nil {
 		f.Close()
+		_ = os.Remove(path)
 		return nil, err
 	}
 
@@ -77,13 +81,21 @@ func New(logDir string, args []string, redactionEnabled bool) (*Logger, error) {
 	// never written while redaction is enabled.
 	if os.Getenv("KUROKO_RAW_DEBUG") == "1" && !redactionEnabled {
 		rawPath := path + ".raw"
-		rf, err := os.OpenFile(rawPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+		rf, err := os.OpenFile(rawPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
 			l.rawFile = rf
 		}
 	}
 
 	return l, nil
+}
+
+func sanitizeHeaderValue(s string, redact bool) string {
+	s = strings.NewReplacer("\r", " ", "\n", " ").Replace(s)
+	if redact {
+		s = string(RedactText([]byte(s)))
+	}
+	return s
 }
 
 func (l *Logger) Write(p []byte) (int, error) {

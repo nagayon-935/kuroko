@@ -38,7 +38,7 @@ func planMigration(paths config.Paths, source string, configTransfer *transfer) 
 		plan.files = append(plan.files, batch...)
 	}
 	plan.logs = len(plan.files)
-	companions, err := planRawCompanions(plan.files)
+	companions, err := planRawCompanions(plan.files, reserved)
 	if err != nil {
 		return plan, err
 	}
@@ -49,7 +49,7 @@ func planMigration(paths config.Paths, source string, configTransfer *transfer) 
 	return plan, nil
 }
 
-func planRawCompanions(logs []transfer) ([]transfer, error) {
+func planRawCompanions(logs []transfer, reserved map[string][32]byte) ([]transfer, error) {
 	var companions []transfer
 	for _, log := range logs {
 		raw := log.source + ".raw"
@@ -60,9 +60,12 @@ func planRawCompanions(logs []transfer) ([]transfer, error) {
 		if err != nil {
 			return nil, err
 		}
-		destination, err := freeDestination(log.destination+".raw", data.hash, nil)
+		destination, err := freeDestination(log.destination+".raw", data.hash, reserved)
 		if err != nil {
 			return nil, err
+		}
+		if reserved != nil {
+			reserved[destination] = data.hash
 		}
 		companions = append(companions, transfer{source: raw, destination: destination, sourceHash: data.hash, targetHash: data.hash, modified: data.modified})
 	}

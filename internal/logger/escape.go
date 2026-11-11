@@ -89,15 +89,19 @@ func isCompleteEscape(seq []byte) bool {
 	}
 }
 
+const maxCSICount = 4096
+
 // csiCount returns the repeat count N of a CSI sequence from its parameter
 // string: the first run of digits, or 1 when there is none (or it is 0).
+// Counts are capped at maxCSICount to prevent integer overflow and unbounded
+// row allocations on crafted sequences.
 func csiCount(params string) int {
 	var val int
 	var found bool
 	for i := 0; i < len(params); i++ {
 		c := params[i]
 		if c >= '0' && c <= '9' {
-			val = val*10 + int(c-'0')
+			val = min(val*10+int(c-'0'), maxCSICount)
 			found = true
 		} else if found {
 			break
@@ -107,6 +111,19 @@ func csiCount(params string) int {
 		return val
 	}
 	return 1
+}
+
+// isStandardCSIParams reports whether params contains only standard CSI
+// numeric parameter bytes (digits and ';'), excluding private-mode prefixes
+// ('?', '>', '<', '=') and intermediate bytes (0x20–0x2F).
+func isStandardCSIParams(params string) bool {
+	for i := 0; i < len(params); i++ {
+		c := params[i]
+		if (c < '0' || c > '9') && c != ';' {
+			return false
+		}
+	}
+	return true
 }
 
 type escState uint8

@@ -5,6 +5,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"unicode/utf8"
 )
 
 // Control bytes delivered by a terminal in raw mode.
@@ -123,7 +124,8 @@ func EditLine(line string, key []byte) (string, EditResult) {
 		if line == "" {
 			return line, EditIgnored
 		}
-		return line[:len(line)-1], EditChanged
+		_, size := utf8.DecodeLastRuneInString(line)
+		return line[:len(line)-size], EditChanged
 	default:
 		if b >= 32 && b < 127 {
 			return line + string(b), EditChanged
