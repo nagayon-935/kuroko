@@ -55,7 +55,7 @@ Examples:
 Logs are saved to ~/.kuroko/logs/ by default.
 
 Shell completion (bash):
-  source <(kuroko completion bash)                                    # current shell only
+  eval "$(kuroko completion bash)"                                    # current shell only
   kuroko completion bash > ~/.local/share/bash-completion/completions/kuroko  # permanent
 
 Priority: --log-dir flag > $KUROKO_LOG_DIR > config.json > default
@@ -159,9 +159,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return 0 // completion must never surface errors to the shell
 		}
-		for _, c := range completion.Candidates(rest[1:], cfg) {
-			fmt.Fprintln(stdout, c)
-		}
+		home, _ := os.UserHomeDir() // "" just skips ~/.ssh/config hosts
+		_ = completion.Write(stdout, rest[1:], cfg, home)
 		return 0
 	}
 

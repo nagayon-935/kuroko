@@ -16,10 +16,10 @@ import (
 const chromeHeight = 3
 
 type CommandMetadata struct {
-	Timestamp    string `json:"timestamp"`
-	Command      string `json:"command"`
-	Offset       int64  `json:"offset"`
-	WholeSession bool   `json:"-"`
+	Timestamp    string
+	Command      string
+	Offset       int64
+	WholeSession bool
 }
 
 type Pane int
@@ -211,7 +211,7 @@ func (v *Viewer) parseMetadata() {
 	for i, line := range lines {
 		lineLen := int64(len(line)) + 1 // +1 for the newline character
 
-		lineStr := string(line)
+		lineStr := strings.TrimSuffix(string(line), "\r")
 
 		prefix := "# kuroko:cmd:"
 		if strings.HasPrefix(lineStr, prefix) {

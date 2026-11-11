@@ -81,6 +81,7 @@ func TestEditLine(t *testing.T) {
 		{"printable byte appends", "ab", []byte("c"), "abc", EditChanged},
 		{"delete removes last byte", "abc", []byte{KeyDelete}, "ab", EditChanged},
 		{"backspace removes last byte", "abc", []byte{KeyBackspace}, "ab", EditChanged},
+		{"backspace removes full UTF-8 rune", "あいう", []byte{KeyBackspace}, "あい", EditChanged},
 		{"backspace on empty line is ignored", "", []byte{KeyDelete}, "", EditIgnored},
 		{"carriage return submits", "abc", []byte{KeyCR}, "abc", EditSubmit},
 		{"line feed submits", "abc", []byte{KeyLF}, "abc", EditSubmit},

@@ -266,11 +266,12 @@ kuroko export session.log.gz
 
 ### シェル補完 (bash)
 
-`kuroko` のサブコマンド・オプション・`kuroko view` のログファイル名を bash の TAB 補完で入力できます。
+`kuroko` のサブコマンド・オプション・`kuroko view` のログファイル名、ラップするコマンドの引数（`kuroko ssh` の接続先など）を bash の TAB 補完で入力できます。
 
 ```bash
 # 現在のシェルだけで有効化
-source <(kuroko completion bash)
+# (source <(...) は macOS 標準の bash 3.2 では読み込めないため eval を使う)
+eval "$(kuroko completion bash)"
 
 # 恒久的に有効化
 kuroko completion bash > ~/.local/share/bash-completion/completions/kuroko
@@ -282,7 +283,12 @@ kuroko completion bash > "$(brew --prefix)/etc/bash_completion.d/kuroko"
 kuroko <TAB>          # logs / view / export / migrate / help / completion と PATH 上のコマンドを補完
 kuroko view <TAB>     # ~/.kuroko/logs (または -d で指定したディレクトリ) のログファイル名を補完
 kuroko -<TAB>         # --log-dir / -d / --help / -h / --version / -v を補完
+kuroko ssh <TAB>      # ssh 単体と同じ補完（~/.ssh/config の Host、known_hosts、-i の鍵ファイルなど）
+kuroko ssh admin@<TAB>  # user@host 形式でも Host を補完
 ```
+
+ラップするコマンド（`kuroko ssh` / `kuroko telnet` など）の引数は、bash-completion が読み込まれていればそのコマンド自身の補完に委ねます（`sudo` と同じ仕組み）。
+bash-completion がない環境では、`kuroko ssh` には `~/.ssh/config`（`Include` 先を含む。ワイルドカードの Host は除く）の Host を、それ以外のコマンドにはファイル名を補完します。
 
 候補が1つなら自動で入力され、複数あれば一覧表示されます（bash 標準の補完動作）。
 

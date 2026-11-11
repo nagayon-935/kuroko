@@ -9,6 +9,7 @@ import (
 	"github.com/nagayon-935/kuroko/internal/config"
 	"github.com/nagayon-935/kuroko/internal/logger"
 	"github.com/nagayon-935/kuroko/internal/textwidth"
+	"github.com/nagayon-935/kuroko/internal/tui"
 )
 
 // ansiColor maps color name strings to ANSI foreground escape codes.
@@ -60,21 +61,8 @@ func writeBanner(w io.Writer, args []string, cfg *config.Config) {
 	}
 }
 
-// displayWidth returns the number of terminal columns that string s occupies.
-func displayWidth(s string) int {
-	return textwidth.String(s)
-}
-
-// pad right-pads s with spaces so that its display width equals targetWidth.
-func pad(s string, targetWidth int) string {
-	w := displayWidth(s)
-	if w < targetWidth {
-		return s + strings.Repeat(" ", targetWidth-w)
-	}
-	return s
-}
-
 func formatHostLine(host string) string {
+	host = tui.Plain(host)
 	if isIPAddress(host) {
 		return fmt.Sprintf("  IPアドレス: %s", host)
 	}
@@ -109,7 +97,7 @@ func isIPAddress(s string) bool {
 func maxDisplayWidth(lines []string) int {
 	w := 0
 	for _, l := range lines {
-		if dw := displayWidth(l); dw > w {
+		if dw := textwidth.String(l); dw > w {
 			w = dw
 		}
 	}
@@ -123,19 +111,19 @@ func renderPlainBanner(w io.Writer, address, hostname string) {
 
 	fmt.Fprintf(w, "┌%s┐\n", border)
 	for _, l := range lines {
-		fmt.Fprintf(w, "│ %s │\n", pad(l, innerWidth-2))
+		fmt.Fprintf(w, "│ %s │\n", textwidth.Fit(l, innerWidth-2))
 	}
 	fmt.Fprintf(w, "└%s┘\n", border)
 }
 
 func renderColoredBanner(w io.Writer, address, hostname, label, color string) {
-	lines := append(buildLines(address, hostname), fmt.Sprintf("  [%s]", label))
+	lines := append(buildLines(address, hostname), fmt.Sprintf("  [%s]", tui.Plain(label)))
 	innerWidth := maxDisplayWidth(lines) + 2
 	border := strings.Repeat("═", innerWidth)
 
 	fmt.Fprintf(w, "%s%s╔%s╗%s\n", color, ansiBold, border, ansiReset)
 	for _, l := range lines {
-		fmt.Fprintf(w, "%s%s║ %s ║%s\n", color, ansiBold, pad(l, innerWidth-2), ansiReset)
+		fmt.Fprintf(w, "%s%s║ %s ║%s\n", color, ansiBold, textwidth.Fit(l, innerWidth-2), ansiReset)
 	}
 	fmt.Fprintf(w, "%s%s╚%s╝%s\n", color, ansiBold, border, ansiReset)
 }

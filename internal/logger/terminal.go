@@ -178,6 +178,9 @@ func (t *terminal) handleOSC(payload []byte) {
 func (t *terminal) handleCSI(seq []byte) {
 	final := seq[len(seq)-1]
 	params := string(seq[2 : len(seq)-1])
+	if !isStandardCSIParams(params) {
+		return
+	}
 	n := csiCount(params)
 
 	switch final {

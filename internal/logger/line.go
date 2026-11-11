@@ -45,7 +45,11 @@ func (b *lineBuffer) backspace() {
 
 // forward moves the cursor n columns right (CSI C); later writes pad the
 // gap with spaces.
-func (b *lineBuffer) forward(n int) { b.col += n }
+func (b *lineBuffer) forward(n int) {
+	if n > 0 {
+		b.col = min(b.col+n, len(b.cells)+maxCSICount)
+	}
+}
 
 // backward moves the cursor n columns left (CSI D), stopping at column 0.
 func (b *lineBuffer) backward(n int) { b.col = max(b.col-n, 0) }
@@ -53,16 +57,25 @@ func (b *lineBuffer) backward(n int) { b.col = max(b.col-n, 0) }
 // eraseToEnd clears from the cursor to the end of the row (CSI K / 0K).
 func (b *lineBuffer) eraseToEnd() {
 	if b.col < len(b.cells) {
+		if b.cells[b.col] == wideContinuation && b.col > 0 {
+			b.cells[b.col-1] = ' '
+		}
 		b.cells = b.cells[:b.col]
 	}
 }
 
 // deleteChars removes n cells at the cursor, shifting the rest left (CSI P).
 func (b *lineBuffer) deleteChars(n int) {
-	if b.col >= len(b.cells) {
+	if n <= 0 || b.col >= len(b.cells) {
 		return
 	}
-	if b.col+n < len(b.cells) {
+	if b.cells[b.col] == wideContinuation && b.col > 0 {
+		b.cells[b.col-1] = ' '
+	}
+	if n < len(b.cells)-b.col {
+		if b.cells[b.col+n] == wideContinuation {
+			b.cells[b.col+n] = ' '
+		}
 		copy(b.cells[b.col:], b.cells[b.col+n:])
 		b.cells = b.cells[:len(b.cells)-n]
 	} else {
@@ -93,12 +106,20 @@ func (b *lineBuffer) put(r rune) {
 }
 
 // setCell writes r at column col, padding the row with spaces up to col if
-// the cursor had previously moved past the end of the buffer.
+// the cursor had previously moved past the end of the buffer. If overwriting
+// col splits an existing wide rune, its remaining half is replaced with a
+// space so column alignment is preserved.
 func (b *lineBuffer) setCell(col int, r rune) {
 	for len(b.cells) < col {
 		b.cells = append(b.cells, ' ')
 	}
 	if col < len(b.cells) {
+		if b.cells[col] == wideContinuation && col > 0 {
+			b.cells[col-1] = ' '
+		}
+		if col+1 < len(b.cells) && b.cells[col+1] == wideContinuation {
+			b.cells[col+1] = ' '
+		}
 		b.cells[col] = r
 	} else {
 		b.cells = append(b.cells, r)

@@ -164,33 +164,6 @@ func TestIsIPAddress(t *testing.T) {
 	}
 }
 
-func TestDisplayWidth(t *testing.T) {
-	tests := []struct {
-		s     string
-		width int
-	}{
-		{"abc", 3},
-		{"接続先", 6},            // 3 CJK chars × 2 columns each
-		{"  接続先: router", 14}, // 2 + 6 + 2 + 6 = 16... let me calculate: "  "=2, "接続先"=6, ": "=2, "router"=6 = 16
-		{"[PRODUCTION]", 12},
-	}
-	// Recalculate expected values.
-	for _, tt := range tests {
-		got := displayWidth(tt.s)
-		// We just verify the function doesn't blow up and returns > 0 for non-empty strings.
-		if len(tt.s) > 0 && got <= 0 {
-			t.Errorf("displayWidth(%q) = %d, want > 0", tt.s, got)
-		}
-	}
-	// Verify CJK chars count as 2.
-	if displayWidth("接") != 2 {
-		t.Errorf("displayWidth(\"接\") = %d, want 2", displayWidth("接"))
-	}
-	if displayWidth("a") != 1 {
-		t.Errorf("displayWidth(\"a\") = %d, want 1", displayWidth("a"))
-	}
-}
-
 func TestBannerBorderAlignment(t *testing.T) {
 	var buf bytes.Buffer
 	cfg := &config.Config{
@@ -208,5 +181,22 @@ func TestBannerBorderAlignment(t *testing.T) {
 	if len(top) != len(bot) {
 		t.Errorf("banner top/bottom border length mismatch: %d vs %d\ntop: %s\nbot: %s",
 			len(top), len(bot), lines[0], lines[len(lines)-1])
+	}
+}
+
+func TestBannerSanitizesEscapeAndBidiChars(t *testing.T) {
+	var buf bytes.Buffer
+	cfg := &config.Config{
+		Banner: config.BannerConfig{
+			Enabled: true,
+			Rules: []config.BannerRule{
+				{Match: "prod", Label: "PROD\x1b]52;c;aGVsbG8=\x07\u202e", Color: "red"},
+			},
+		},
+	}
+	writeBanner(&buf, []string{"ssh", "admin@prod\x1b[2J\u202e-01"}, cfg)
+	out := buf.String()
+	if strings.Contains(out, "\x1b]52") || strings.Contains(out, "\x1b[2J") || strings.ContainsRune(out, '\u202e') {
+		t.Errorf("banner did not strip terminal escape or bidi control characters: %q", out)
 	}
 }

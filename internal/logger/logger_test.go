@@ -1601,3 +1601,137 @@ func TestLoggerJapaneseMidLineInsertion(t *testing.T) {
 		t.Errorf("expected %q in log, got:\n%s", "abcあdef", content)
 	}
 }
+
+func TestLoggerCSIOverflowAndPrivateParams(t *testing.T) {
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host"}, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// Huge CSI repeat counts must not overflow int into negative indices or allocate GBs.
+	l.Write([]byte("a\x1b[9223372036854775807Cb\n"))
+	l.Write([]byte("cde\x1b[2D\x1b[9223372036854775807P\n"))
+	l.Write([]byte("row1\nrow2\x1b[1A\x1b[9223372036854775807Brow3\n"))
+	// Private/intermediate CSI sequences ending in C/D/P/K/J must be ignored.
+	l.Write([]byte("hello\x1b[?5C\x1b[>2K\x1b[ 1Pworld\n"))
+	if err := l.Close(0); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+
+	data, err := os.ReadFile(l.Path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(data), "helloworld") {
+		t.Errorf("expected private CSI sequences to leave text intact, got:\n%s", string(data))
+	}
+}
+
+func TestLoggerWideRuneSplitOverwrite(t *testing.T) {
+	var b lineBuffer
+	// Overwriting the first column of a 2-column rune must clear its second column.
+	b.put('あ')
+	b.home()
+	b.put('x')
+	b.forward(1)
+	if got := string(b.text()); got != "x " {
+		t.Errorf("overwrite first half of wide rune: got %q, want %q", got, "x ")
+	}
+
+	// Overwriting the second column of a 2-column rune must clear its first column.
+	b.reset()
+	b.put('あ')
+	b.backspace()
+	b.put('x')
+	if got := string(b.text()); got != " x" {
+		t.Errorf("overwrite second half of wide rune: got %q, want %q", got, " x")
+	}
+
+	// Erasing to end from the middle of a wide rune must replace its leading half with a space.
+	b.reset()
+	b.put('あ')
+	b.backspace()
+	b.eraseToEnd()
+	if got := string(b.text()); got != " " {
+		t.Errorf("eraseToEnd mid-wide-rune: got %q, want %q", got, " ")
+	}
+
+	// Deleting across the middle of two wide runes must clear both orphaned halves.
+	b.reset()
+	b.put('あ')
+	b.put('い')
+	b.backward(3) // col 1 (second half of 'あ')
+	b.deleteChars(2)
+	b.forward(1)
+	if got := string(b.text()); got != "  " {
+		t.Errorf("deleteChars mid-wide-rune: got %q, want %q", got, "  ")
+	}
+}
+
+func TestRedactEdgeCasesAndHeaderSanitization(t *testing.T) {
+	// 1. Secret matching prefix keyword must still redact the secret, not the prefix.
+	got := string(RedactText([]byte("Authorization: Bearer Bearer\nALTER USER u IDENTIFIED BY 'identified';\n")))
+	if !strings.Contains(got, "Bearer [TOKEN_REDACTED]") {
+		t.Errorf("Bearer keyword collision not redacted properly: %q", got)
+	}
+	if !strings.Contains(got, "IDENTIFIED BY '[PASSWORD_REDACTED]'") {
+		t.Errorf("SQL keyword collision not redacted properly: %q", got)
+	}
+
+	// 2. Single-line PEM block must not leave inPEMBlock stuck true for subsequent lines.
+	pemOneLine := "-----BEGIN PRIVATE KEY----- secret -----END PRIVATE KEY-----\nnormal line after\n"
+	gotPEM := string(RedactText([]byte(pemOneLine)))
+	if !strings.Contains(gotPEM, "normal line after") {
+		t.Errorf("single-line PEM block left redactor stuck in PEM mode:\n%s", gotPEM)
+	}
+
+	// 3. Header command line must redact secrets when redactionEnabled=true and strip newlines.
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host", "Bearer secret_token_123\n# FakeHeader : injected"}, true)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	_ = l.Close(0)
+	data, err := os.ReadFile(l.Path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	content := string(data)
+	if strings.Contains(content, "secret_token_123") {
+		t.Errorf("header leaked unredacted token:\n%s", content)
+	}
+	if strings.Contains(content, "\n# FakeHeader :") {
+		t.Errorf("header allowed newline injection:\n%s", content)
+	}
+}
+
+func TestExtractSSHTargetAndSanitize(t *testing.T) {
+	tests := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"ssh", "-vvp", "2222", "admin@router-01"}, "admin@router-01"},
+		{[]string{"ssh", "-46p2222", "admin@router-01"}, "admin@router-01"},
+		{[]string{"ssh", "-B", "eth0", "-O", "check", "-P", "tag", "router-02"}, "router-02"},
+		{[]string{"ssh", "--", "router-03", "uptime"}, "router-03"},
+	}
+	for _, tt := range tests {
+		if got := TargetAddress(tt.args); got != tt.want {
+			t.Errorf("TargetAddress(%v) = %q, want %q", tt.args, got, tt.want)
+		}
+	}
+
+	// sanitize must strip control/format chars and cap byte length on a UTF-8 boundary.
+	dirty := "host\x1b\u202e" + strings.Repeat("あ", 50)
+	cleaned := sanitize(dirty)
+	if strings.ContainsAny(cleaned, "\x1b\u202e") {
+		t.Errorf("sanitize left control/format runes in %q", cleaned)
+	}
+	if len(cleaned) > maxFilenamePartBytes {
+		t.Errorf("sanitize length = %d, want <= %d", len(cleaned), maxFilenamePartBytes)
+	}
+	if !utf8.ValidString(cleaned) {
+		t.Errorf("sanitize produced invalid UTF-8: %q", cleaned)
+	}
+}

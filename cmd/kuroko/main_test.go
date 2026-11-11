@@ -86,6 +86,21 @@ func TestRunHiddenCompleteListsSubcommands(t *testing.T) {
 	}
 }
 
+func TestRunHiddenCompleteDelegatesWrappedSSH(t *testing.T) {
+	logDir := isolate(t)
+	sshDir := filepath.Join(os.Getenv("HOME"), ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sshDir, "config"), []byte("Host edgeSW03\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, _ := runCLI(t, "-d", logDir, "__complete", "ssh")
+	if code != 0 || stdout != ":wrapped=1\nedgeSW03\n" {
+		t.Fatalf("__complete ssh = %d, %q; want the wrapped directive then the ssh_config host", code, stdout)
+	}
+}
+
 func TestRunRecordsCommandAndReturnsItsExitCode(t *testing.T) {
 	logDir := isolate(t)
 	// Without a terminal on stdin the session runs the command directly,

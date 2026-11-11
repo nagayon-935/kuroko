@@ -15,8 +15,14 @@ var (
 
 func redactSubmatch(line []byte, re *regexp.Regexp, group int, placeholder []byte) []byte {
 	return re.ReplaceAllFunc(line, func(match []byte) []byte {
-		if parts := re.FindSubmatch(match); len(parts) > group {
-			return bytes.Replace(match, parts[group], placeholder, 1)
+		idx := re.FindSubmatchIndex(match)
+		if len(idx) > 2*group+1 && idx[2*group] >= 0 {
+			start, end := idx[2*group], idx[2*group+1]
+			out := make([]byte, 0, len(match)-(end-start)+len(placeholder))
+			out = append(out, match[:start]...)
+			out = append(out, placeholder...)
+			out = append(out, match[end:]...)
+			return out
 		}
 		return match
 	})
@@ -34,7 +40,12 @@ func (r *redactor) redact(line []byte) []byte {
 	lineStr := string(line)
 
 	// Stateful PEM Block redaction
-	if strings.Contains(lineStr, "-----BEGIN") && strings.Contains(lineStr, "PRIVATE KEY-----") {
+	if beginIdx := strings.Index(lineStr, "-----BEGIN"); beginIdx >= 0 && strings.Contains(lineStr[beginIdx:], "PRIVATE KEY-----") {
+		rest := lineStr[beginIdx:]
+		if endIdx := strings.Index(rest, "-----END"); endIdx >= 0 && strings.Contains(rest[endIdx:], "PRIVATE KEY-----") {
+			r.inPEMBlock = false
+			return []byte("[PEM PRIVATE KEY BLOCK ENDED - REDACTED]")
+		}
 		r.inPEMBlock = true
 		return []byte("[PEM PRIVATE KEY BLOCK STARTED - REDACTED]")
 	}
