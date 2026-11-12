@@ -100,11 +100,11 @@ func (w *rowWindow) eraseBelow() {
 	}
 }
 
-// eraseAll drops the whole pending window (CSI 2J / 3J).
-func (w *rowWindow) eraseAll() {
-	w.rows = w.rows[:0]
-	w.cursor = 0
-}
+// eraseAll handles a screen or scrollback clear (CSI 2J / 3J). The rows are
+// gone from the screen, so no redraw can rewrite them any more: they are
+// written out, not dropped. Dropping them would lose up to a screenful of
+// the session every time the user runs clear or presses Ctrl+L.
+func (w *rowWindow) eraseAll() error { return w.flush() }
 
 // flush writes every remaining pending row in order, e.g. once the session
 // ends and no further redraw can occur.
@@ -114,7 +114,7 @@ func (w *rowWindow) flush() error {
 			return err
 		}
 	}
-	w.rows = nil
+	w.rows = w.rows[:0]
 	w.cursor = 0
 	return nil
 }

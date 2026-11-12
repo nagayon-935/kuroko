@@ -3,10 +3,11 @@ package notifier
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -65,11 +66,10 @@ func (d *discordNotifier) NotifyStart(command string) error {
 }
 
 func (d *discordNotifier) NotifyEnd(logPath, command string, exitCode int, duration time.Duration) error {
-	logContent, err := readLogForSending(logPath)
+	logContent, err := readLogForSending(logPath, maxAttachmentBytes)
 	if err != nil {
 		return err
 	}
-	logContent = []byte(truncate(string(logContent), maxAttachmentBytes))
 
 	color := 0x2ecc71 // green = success
 	status := "✅ Success"
@@ -112,7 +112,7 @@ func (d *discordNotifier) NotifyEnd(logPath, command string, exitCode int, durat
 	if err != nil {
 		return fmt.Errorf("creating file field: %w", err)
 	}
-	if _, err := fw.Write(logContent); err != nil {
+	if _, err := fw.Write([]byte(logContent)); err != nil {
 		return fmt.Errorf("writing file field: %w", err)
 	}
 
@@ -122,7 +122,7 @@ func (d *discordNotifier) NotifyEnd(logPath, command string, exitCode int, durat
 
 	req, err := http.NewRequest(http.MethodPost, d.webhookURL, &buf)
 	if err != nil {
-		return err
+		return withoutURL(err)
 	}
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	return doRequest(req)
@@ -135,7 +135,7 @@ func (d *discordNotifier) postEmbed(embed map[string]any) error {
 	}
 	req, err := http.NewRequest(http.MethodPost, d.webhookURL, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return withoutURL(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	return doRequest(req)
@@ -152,7 +152,7 @@ func (s *slackNotifier) NotifyStart(command string) error {
 }
 
 func (s *slackNotifier) NotifyEnd(logPath, command string, exitCode int, duration time.Duration) error {
-	logContent, err := readLogForSending(logPath)
+	logContent, err := readLogForSending(logPath, slackExcerptBytes)
 	if err != nil {
 		return err
 	}
@@ -162,7 +162,7 @@ func (s *slackNotifier) NotifyEnd(logPath, command string, exitCode int, duratio
 	}
 	// A ``` inside the log would close the code block early; a zero-width
 	// space keeps it literal.
-	excerpt := strings.ReplaceAll(truncate(string(logContent), 2500), "```", "``\u200b`")
+	excerpt := strings.ReplaceAll(logContent, "```", "``\u200b`")
 	text := fmt.Sprintf("%s *kuroko* `%s` ended (exit %d, %s)\n```%s```",
 		icon, redactCommand(command), exitCode, formatDuration(duration), excerpt)
 	return postJSON(s.webhookURL, map[string]string{"text": text})
@@ -174,20 +174,51 @@ func (s *slackNotifier) NotifyEnd(logPath, command string, exitCode int, duratio
 // limit (10 MiB on most servers); longer logs keep their end.
 const maxAttachmentBytes = 8 << 20
 
-// readLogForSending returns the text of the log at logPath, decompressing a
-// .gz log, with credentials masked. The content leaves the machine, so it is
-// masked even when redaction is off for the local log file.
-func readLogForSending(logPath string) ([]byte, error) {
+// slackExcerptBytes is how much of the end of the log a Slack message quotes.
+const slackExcerptBytes = 2500
+
+// readLogForSending returns the last max bytes of the text of the log at
+// logPath, decompressing a .gz log, with credentials masked. The content
+// leaves the machine, so it is masked even when redaction is off for the
+// local log file.
+//
+// The log is streamed: it is masked from its first line, so a private key
+// that begins before the kept tail is still recognised, but only the tail is
+// held in memory however large the log is.
+func readLogForSending(logPath string, max int) (string, error) {
 	r, err := logstore.Open(logPath)
 	if err != nil {
-		return nil, fmt.Errorf("reading log: %w", err)
+		return "", fmt.Errorf("reading log: %w", err)
 	}
 	defer r.Close()
-	data, err := io.ReadAll(r)
-	if err != nil {
-		return nil, fmt.Errorf("reading log: %w", err)
+	// One rune more than max, so truncate can tell the log was cut.
+	tail := &tailBuffer{max: max + utf8.UTFMax}
+	if err := logger.RedactTo(tail, r); err != nil {
+		return "", fmt.Errorf("reading log: %w", err)
 	}
-	return logger.RedactText(data), nil
+	return truncate(string(tail.bytes()), max), nil
+}
+
+// tailBuffer is an io.Writer that keeps the last max bytes written to it.
+type tailBuffer struct {
+	max  int
+	data []byte
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.data = append(t.data, p...)
+	// Compact only once the buffer has doubled, so the copy is amortised.
+	if len(t.data) > 2*t.max {
+		t.data = append(t.data[:0], t.data[len(t.data)-t.max:]...)
+	}
+	return len(p), nil
+}
+
+func (t *tailBuffer) bytes() []byte {
+	if len(t.data) > t.max {
+		return t.data[len(t.data)-t.max:]
+	}
+	return t.data
 }
 
 // redactCommand masks credentials in a command line before it is sent.
@@ -199,10 +230,21 @@ func redactCommand(command string) string {
 // unreachable or slow webhook from hanging session start/end indefinitely.
 var httpClient = &http.Client{Timeout: 10 * time.Second}
 
+// withoutURL drops the request URL from an HTTP client or URL parse error.
+// A webhook URL carries its secret token, and these errors are printed to
+// the terminal, where a screen share or a pasted transcript would leak it.
+func withoutURL(err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return fmt.Errorf("webhook request failed: %w", urlErr.Err)
+	}
+	return err
+}
+
 func doRequest(req *http.Request) error {
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return err
+		return withoutURL(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
@@ -211,14 +253,14 @@ func doRequest(req *http.Request) error {
 	return nil
 }
 
-func postJSON(url string, payload any) error {
+func postJSON(webhookURL string, payload any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, webhookURL, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return withoutURL(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	return doRequest(req)

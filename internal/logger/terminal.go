@@ -59,7 +59,9 @@ func (t *terminal) feed(data []byte) error {
 	for _, b := range data {
 		if t.esc.active() {
 			if seq, done := t.esc.feed(b); done {
-				t.handleEscape(seq)
+				if err := t.handleEscape(seq); err != nil {
+					return err
+				}
 			}
 			continue
 		}
@@ -148,13 +150,17 @@ func (t *terminal) snapshotLine() {
 // handleEscape applies the sequences that affect what the log records: CSI
 // cursor and erase controls, and OSC 133 prompt marks. Everything else
 // (colors, titles, hyperlinks, charset switches, …) is dropped.
-func (t *terminal) handleEscape(seq escapeSeq) {
+//
+// It returns an error only when rows had to be written out and the write
+// failed.
+func (t *terminal) handleEscape(seq escapeSeq) error {
 	switch seq.kind {
 	case '[':
-		t.handleCSI(seq.data)
+		return t.handleCSI(seq.data)
 	case ']':
 		t.handleOSC(seq.data)
 	}
+	return nil
 }
 
 // handleOSC applies OSC 133 semantic prompt marks (the FinalTerm shell
@@ -170,16 +176,18 @@ func (t *terminal) handleOSC(payload []byte) {
 	case 'A':
 		t.prompts.clearMark()
 	case 'B':
-		t.prompts.markPromptEnd(t.line.text())
+		// The prompt ends at the cursor; anything right of it (a right
+		// prompt drawn before the mark) is not part of it.
+		t.prompts.markPromptEnd(t.line.textToCursor())
 	}
 }
 
 // handleCSI applies a complete CSI sequence (seq starts with ESC [).
-func (t *terminal) handleCSI(seq []byte) {
+func (t *terminal) handleCSI(seq []byte) error {
 	final := seq[len(seq)-1]
 	params := string(seq[2 : len(seq)-1])
 	if !isStandardCSIParams(params) {
-		return
+		return nil
 	}
 	n := csiCount(params)
 
@@ -204,11 +212,12 @@ func (t *terminal) handleCSI(seq []byte) {
 		case "", "0":
 			t.rows.eraseBelow()
 		case "2", "3":
-			t.rows.eraseAll()
+			return t.rows.eraseAll()
 		}
 	case 'P': // Delete character(s) at cursor
 		t.line.deleteChars(n)
 	}
+	return nil
 }
 
 // finish writes out every row still held in memory, including an

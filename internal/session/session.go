@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -30,6 +31,14 @@ type Session struct {
 	start      time.Time // set at the beginning of Run(); read by terminateForSignal to compute NotifyEnd's duration
 	finishOnce sync.Once // normal exit and signal cleanup share one finalization
 	logFailed  atomic.Bool
+	// startNotified receives the result of the session-start notification,
+	// which is sent in the background; nil when none was started.
+	startNotified chan error
+	// signalExit is the exit code (128+signal) of the termination signal
+	// being handled, or 0. It is set before the child is signalled, so the
+	// normal exit path — which sees the child die of that signal — reports
+	// the same code as the signal handler, whichever finishes first.
+	signalExit atomic.Int32
 }
 
 func New(cfg *config.Config, args []string) (*Session, error) {
@@ -61,12 +70,19 @@ func (s *Session) Run() (int, error) {
 
 	command := strings.Join(s.args, " ")
 
-	if err := s.notifier.NotifyStart(command); err != nil {
-		console.Warnf("notify error: %v", err)
-	}
+	// The start notification is sent in the background: a slow or unreachable
+	// webhook (an isolated lab network) must not hold up the connection.
+	// finishLog collects the result, so the request is never cut short by the
+	// process exiting and its warning never lands in the middle of the
+	// session's output.
+	s.startNotified = make(chan error, 1)
+	go func(done chan<- error) { done <- s.notifier.NotifyStart(command) }(s.startNotified)
 
 	s.start = time.Now()
 	exitCode, err := s.runWithPTY()
+	if code := s.signalExit.Load(); code != 0 {
+		exitCode = int(code)
+	}
 	s.finish(exitCode)
 	return exitCode, err
 }
@@ -82,6 +98,12 @@ func (s *Session) finishLog(exitCode int) {
 	closeErr := s.log.Close(exitCode)
 	if closeErr != nil {
 		console.Warnf("log close error: %v", closeErr)
+	}
+
+	if s.startNotified != nil {
+		if nerr := <-s.startNotified; nerr != nil {
+			console.Warnf("notify error: %v", nerr)
+		}
 	}
 
 	logPath := s.log.Path
@@ -167,13 +189,19 @@ func (s *Session) runWithPTY() (int, error) {
 }
 
 // waitResult converts the error returned by cmd.Wait() (or the error from
-// cmd.Run(), which has the same shape) into a process exit code. Split out
-// so the exit-code mapping is unit-testable without a real PTY or process.
+// cmd.Run(), which has the same shape) into a process exit code. A child
+// killed by a signal is reported as 128+signal, as shells do; ExitCode
+// returns -1 for it, which os.Exit would turn into 255. Split out so the
+// exit-code mapping is unit-testable without a real PTY or process.
 func waitResult(err error) (int, error) {
 	if err == nil {
 		return 0, nil
 	}
-	if exitErr, ok := err.(*exec.ExitError); ok {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+			return 128 + int(ws.Signal()), nil
+		}
 		return exitErr.ExitCode(), nil
 	}
 	return 1, fmt.Errorf("waiting for command: %w", err)
@@ -234,18 +262,20 @@ func (s *Session) handleTerminationSignals(oldState *term.State) (stop func()) {
 // from handleTerminationSignals so the cleanup logic can be unit tested
 // without going through os.Exit.
 func (s *Session) terminateForSignal(sig os.Signal, oldState *term.State) int {
-	if oldState != nil {
-		_ = term.Restore(int(os.Stdin.Fd()), oldState)
-	}
-
 	sysSig, hasSysSig := sig.(syscall.Signal)
-	if s.cmd != nil && s.cmd.Process != nil && hasSysSig {
-		_ = s.cmd.Process.Signal(sysSig)
-	}
-
 	code := 128
 	if hasSysSig {
 		code += int(sysSig)
+	}
+	// Publish the code before the child can die of the signal: Run's normal
+	// path may then reach finish first, and must record the same code.
+	s.signalExit.CompareAndSwap(0, int32(code))
+
+	if oldState != nil {
+		_ = term.Restore(int(os.Stdin.Fd()), oldState)
+	}
+	if s.cmd != nil && s.cmd.Process != nil && hasSysSig {
+		_ = s.cmd.Process.Signal(sysSig)
 	}
 	s.finish(code)
 
@@ -263,5 +293,16 @@ func (s *Session) runPlain() (int, error) {
 	cmd.Stdout = io.MultiWriter(os.Stdout, s.logWriter())
 	cmd.Stderr = io.MultiWriter(os.Stderr, s.logWriter())
 
-	return waitResult(cmd.Run())
+	if err := cmd.Start(); err != nil {
+		return 1, fmt.Errorf("starting command: %w", err)
+	}
+	s.cmd = cmd
+
+	// Without this a SIGINT/SIGTERM/SIGHUP kills kuroko by default action,
+	// leaving the log without its footer and the end notification unsent.
+	// There is no terminal state to restore here.
+	stopTermHandler := s.handleTerminationSignals(nil)
+	defer stopTermHandler()
+
+	return waitResult(cmd.Wait())
 }
