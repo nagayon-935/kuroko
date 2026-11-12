@@ -1085,11 +1085,12 @@ func TestLoggerCursorMovement(t *testing.T) {
 		},
 		{
 			name: "cursor backward negative clamp",
-			// "hi" (lineCol=2), back 99 → clamped to 0, write 'X' at 0 (lineCol=1),
-			// '\n' commits lineBuf[:lineCol=1] = "X".  The 'i' tail must not appear.
-			input:      "hi\x1b[99DX\n",
-			want:       "X",
-			wantAbsent: "Xi",
+			// "hi" (lineCol=2), back 99 → clamped to 0, write 'X' at 0. Nothing
+			// erased the 'i', so it is still on screen, exactly as on a real
+			// terminal; the row is "Xi". (A cursor moved back by CSI D keeps
+			// the text to its right — see lineBuffer.text.)
+			input: "hi\x1b[99DX\n",
+			want:  "Xi",
 		},
 	}
 	for _, tt := range tests {
@@ -1437,11 +1438,18 @@ func TestLoggerJapaneseBackspaceOverwrite(t *testing.T) {
 		wantContain string
 	}{
 		{
-			// "あ" occupies 2 terminal columns; two backspaces (the
-			// column-correct erase) must fully remove it, not just two of
-			// its three UTF-8 bytes.
-			name:       "two backspaces fully erase one full-width kanji",
-			input:      "あ\x08\x08\n",
+			// "あ" occupies 2 terminal columns; stepping back two columns and
+			// erasing (how readline deletes a wide character) must fully
+			// remove it, not just two of its three UTF-8 bytes.
+			name:       "two backspaces and an erase fully remove one full-width kanji",
+			input:      "あ\x08\x08\x1b[K\n",
+			wantAbsent: "あ",
+		},
+		{
+			// The tty's ECHOE erase of a wide character: back, blank, back,
+			// once per column.
+			name:       "backspace-space-backspace per column removes one full-width kanji",
+			input:      "あ\x08 \x08\x08 \x08\n",
 			wantAbsent: "あ",
 		},
 		{

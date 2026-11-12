@@ -96,7 +96,18 @@ func compressStream(dst io.Writer, src io.Reader) error {
 	return errors.Join(copyErr, zw.Close())
 }
 
-// RotateLogs scans the logDir and removes old logs based on age and total directory size.
+// abandonedLogAge is how long a log without a completion footer must have
+// been untouched before retention cleanup treats it as abandoned (its session
+// was killed or crashed) rather than as a session still running under an
+// older kuroko that did not lock its log.
+const abandonedLogAge = 24 * time.Hour
+
+// RotateLogs scans the logDir and removes old logs based on age and total
+// directory size. Logs of sessions that are still running are never removed;
+// they still count towards the total size.
+//
+// Only logs that are about to be removed are opened: rotation runs at the end
+// of every session, so it must not read every saved log each time.
 func RotateLogs(logDir string, maxAgeDays int, maxTotalSizeMB int) error {
 	entries, err := logstore.ListLogFiles(logDir)
 	if err != nil {
@@ -114,45 +125,40 @@ func RotateLogs(logDir string, maxAgeDays int, maxTotalSizeMB int) error {
 	now := time.Now()
 	maxAge := time.Duration(maxAgeDays) * 24 * time.Hour
 
-	for _, entry := range entries {
-		name := entry.RelativePath
+	// remove deletes path unless its session is still running, and reports
+	// whether the file is gone.
+	remove := func(path string, modTime time.Time) bool {
+		if activeLog(path, now.Sub(modTime)) {
+			return false
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			rotationErr = errors.Join(rotationErr, fmt.Errorf("remove %s: %w", path, err))
+			return false
+		}
+		return true
+	}
 
+	for _, entry := range entries {
 		info, err := entry.Info()
 		if err != nil {
 			if !os.IsNotExist(err) {
-				rotationErr = errors.Join(rotationErr, fmt.Errorf("stat %s: %w", name, err))
+				rotationErr = errors.Join(rotationErr, fmt.Errorf("stat %s: %w", entry.RelativePath, err))
 			}
-			continue
-		}
-
-		path := entry.Path
-		modTime := info.ModTime()
-		if activeLog(path) {
 			continue
 		}
 
 		// 1. Remove files older than maxAgeDays
-		if maxAgeDays > 0 && now.Sub(modTime) > maxAge {
-			if err := os.Remove(path); err == nil || os.IsNotExist(err) {
-				continue
-			} else {
-				rotationErr = errors.Join(rotationErr, fmt.Errorf("remove %s: %w", path, err))
-			}
-			// Keep failed deletions in the size accounting.
+		if maxAgeDays > 0 && now.Sub(info.ModTime()) > maxAge && remove(entry.Path, info.ModTime()) {
+			continue
 		}
-
-		files = append(files, fileInfo{
-			path:    path,
-			size:    info.Size(),
-			modTime: modTime,
-		})
+		// Files that could not be removed stay in the size accounting.
+		files = append(files, fileInfo{path: entry.Path, size: info.Size(), modTime: info.ModTime()})
 	}
 
 	if maxTotalSizeMB <= 0 {
 		return rotationErr
 	}
 
-	// Calculate total size and check if it exceeds the limit
 	var totalSize int64
 	for _, f := range files {
 		totalSize += f.size
@@ -172,19 +178,23 @@ func RotateLogs(logDir string, maxAgeDays int, maxTotalSizeMB int) error {
 		if totalSize <= maxTotalSizeBytes {
 			break
 		}
-		if err := os.Remove(f.path); err == nil || os.IsNotExist(err) {
+		if remove(f.path, f.modTime) {
 			totalSize -= f.size
-		} else {
-			rotationErr = errors.Join(rotationErr, fmt.Errorf("remove %s: %w", f.path, err))
 		}
 	}
 
 	return rotationErr
 }
 
-// Logs from older kuroko versions have no advisory lock, so also leave
-// recognized sessions without a completion footer outside retention cleanup.
-func activeLog(path string) bool {
+// activeLog reports whether the log at path may belong to a session that is
+// still running; idle is how long ago the file was last written.
+//
+// A running session holds an advisory lock on its log. Logs from older kuroko
+// versions have no lock, so a recognized session log without a completion
+// footer is also left alone — but only while it is recent: once it has been
+// idle for abandonedLogAge, its session was killed or crashed, and keeping it
+// forever would put it beyond retention cleanup.
+func activeLog(path string, idle time.Duration) bool {
 	f, err := os.Open(path)
 	if err != nil {
 		return true
@@ -192,6 +202,11 @@ func activeLog(path string) bool {
 	defer f.Close()
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		return true
+	}
+	// A compressed log was closed before it was compressed, and reading its
+	// footer would mean decompressing all of it.
+	if strings.HasSuffix(path, ".gz") || idle >= abandonedLogAge {
+		return false
 	}
 	s, err := logstore.ReadSummary(path)
 	return err != nil || (s.Command != "" && s.ExitCode == nil)

@@ -30,6 +30,9 @@ type Session struct {
 	start      time.Time // set at the beginning of Run(); read by terminateForSignal to compute NotifyEnd's duration
 	finishOnce sync.Once // normal exit and signal cleanup share one finalization
 	logFailed  atomic.Bool
+	// startNotified receives the result of the session-start notification,
+	// which is sent in the background; nil when none was started.
+	startNotified chan error
 }
 
 func New(cfg *config.Config, args []string) (*Session, error) {
@@ -61,9 +64,13 @@ func (s *Session) Run() (int, error) {
 
 	command := strings.Join(s.args, " ")
 
-	if err := s.notifier.NotifyStart(command); err != nil {
-		console.Warnf("notify error: %v", err)
-	}
+	// The start notification is sent in the background: a slow or unreachable
+	// webhook (an isolated lab network) must not hold up the connection.
+	// finishLog collects the result, so the request is never cut short by the
+	// process exiting and its warning never lands in the middle of the
+	// session's output.
+	s.startNotified = make(chan error, 1)
+	go func(done chan<- error) { done <- s.notifier.NotifyStart(command) }(s.startNotified)
 
 	s.start = time.Now()
 	exitCode, err := s.runWithPTY()
@@ -82,6 +89,12 @@ func (s *Session) finishLog(exitCode int) {
 	closeErr := s.log.Close(exitCode)
 	if closeErr != nil {
 		console.Warnf("log close error: %v", closeErr)
+	}
+
+	if s.startNotified != nil {
+		if nerr := <-s.startNotified; nerr != nil {
+			console.Warnf("notify error: %v", nerr)
+		}
 	}
 
 	logPath := s.log.Path
@@ -263,5 +276,16 @@ func (s *Session) runPlain() (int, error) {
 	cmd.Stdout = io.MultiWriter(os.Stdout, s.logWriter())
 	cmd.Stderr = io.MultiWriter(os.Stderr, s.logWriter())
 
-	return waitResult(cmd.Run())
+	if err := cmd.Start(); err != nil {
+		return 1, fmt.Errorf("starting command: %w", err)
+	}
+	s.cmd = cmd
+
+	// Without this a SIGINT/SIGTERM/SIGHUP kills kuroko by default action,
+	// leaving the log without its footer and the end notification unsent.
+	// There is no terminal state to restore here.
+	stopTermHandler := s.handleTerminationSignals(nil)
+	defer stopTermHandler()
+
+	return waitResult(cmd.Wait())
 }

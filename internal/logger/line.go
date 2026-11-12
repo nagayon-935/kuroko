@@ -15,31 +15,55 @@ const wideContinuation rune = 0
 
 // lineBuffer models the terminal row currently being written: one cell per
 // display column (wide runes occupy two; see wideContinuation) and the cursor
-// column within it. The row is rendered up to the cursor when committed,
-// which is what makes readline's in-place edits come out right.
+// column within it.
 type lineBuffer struct {
 	cells []rune
 	col   int // cursor column (display columns, not bytes or runes)
+	// steppedBack is set once the cursor has been moved left within the row
+	// (\b or CSI D) since the last carriage return; see text.
+	steppedBack bool
 }
 
-// text renders the row up to the cursor.
+// text renders the row as it should be logged.
+//
+// After a carriage return the row is rendered up to the cursor: readline's
+// accept-line redraw reprints a shorter line over the old one without
+// erasing the rest, and the stale tail must not be logged.
+//
+// Once the cursor has stepped left inside the row, the text to its right is
+// still on screen and belongs to the line — the user moved the cursor back
+// into a command and pressed Enter there — so the whole row is rendered.
+// Only trailing blanks right of the cursor are dropped: they are what
+// "\b \b" leaves behind when erasing the last character.
 func (b *lineBuffer) text() []byte {
-	return renderLine(b.cells[:min(b.col, len(b.cells))])
+	end := min(b.col, len(b.cells))
+	if b.steppedBack {
+		end = len(b.cells)
+		for end > b.col && b.cells[end-1] == ' ' {
+			end--
+		}
+	}
+	return renderLine(b.cells[:end])
 }
 
 // reset empties the row and returns the cursor to column 0.
 func (b *lineBuffer) reset() {
 	b.cells = b.cells[:0]
 	b.col = 0
+	b.steppedBack = false
 }
 
 // home returns the cursor to column 0 without clearing the row (\r).
-func (b *lineBuffer) home() { b.col = 0 }
+func (b *lineBuffer) home() {
+	b.col = 0
+	b.steppedBack = false
+}
 
 // backspace moves the cursor one column left (\b), stopping at column 0.
 func (b *lineBuffer) backspace() {
 	if b.col > 0 {
 		b.col--
+		b.steppedBack = true
 	}
 }
 
@@ -52,7 +76,12 @@ func (b *lineBuffer) forward(n int) {
 }
 
 // backward moves the cursor n columns left (CSI D), stopping at column 0.
-func (b *lineBuffer) backward(n int) { b.col = max(b.col-n, 0) }
+func (b *lineBuffer) backward(n int) {
+	if n > 0 && b.col > 0 {
+		b.col = max(b.col-n, 0)
+		b.steppedBack = true
+	}
+}
 
 // eraseToEnd clears from the cursor to the end of the row (CSI K / 0K).
 func (b *lineBuffer) eraseToEnd() {
