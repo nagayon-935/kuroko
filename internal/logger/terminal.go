@@ -176,7 +176,9 @@ func (t *terminal) handleOSC(payload []byte) {
 	case 'A':
 		t.prompts.clearMark()
 	case 'B':
-		t.prompts.markPromptEnd(t.line.text())
+		// The prompt ends at the cursor; anything right of it (a right
+		// prompt drawn before the mark) is not part of it.
+		t.prompts.markPromptEnd(t.line.textToCursor())
 	}
 }
 

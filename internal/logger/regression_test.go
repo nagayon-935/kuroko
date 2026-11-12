@@ -59,6 +59,47 @@ func TestEnterWithCursorInsideLineKeepsWholeCommand(t *testing.T) {
 	}
 }
 
+func TestRightPromptStaysOutOfTheCommandLine(t *testing.T) {
+	// zsh draws RPROMPT by jumping right (CSI C), printing it, and jumping
+	// back (CSI D); it then echoes "e\b" before the typed text. Captured from
+	// zsh 5.9 at 60 columns with RPROMPT=[main].
+	zshPrompt := "\x1b[0m\x1b[27m\x1b[24m\x1b[Juser@h:~% \x1b[K\x1b[43C[main]\x1b[49D\x1b[?2004he\b"
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "zsh, Enter at the end",
+			input: zshPrompt + "echo hello world\x1b[?2004l\r\r\nhello world\r\n",
+			want:  "user@h:~% echo hello world",
+		},
+		{
+			name:  "zsh, Enter with the cursor moved back",
+			input: zshPrompt + "echo hello world\b\b\b\x1b[?2004l\r\r\nhello world\r\n",
+			want:  "user@h:~% echo hello world",
+		},
+		{
+			name:  "zsh without RPROMPT, cursor moved back",
+			input: "\x1b[Juser@h:~% \x1b[K\x1b[?2004he\becho hello world\b\b\b\x1b[?2004l\r\r\nhello world\r\n",
+			want:  "user@h:~% echo hello world",
+		},
+		{
+			name:  "OSC 133 prompt mark after the right prompt",
+			input: "\x1b]133;A\x07user@h:~% \x1b[43C[main]\x1b[49D\x1b]133;B\x07echo hi\r\nhi\r\n",
+			want:  "user@h:~% echo hi",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := withoutTimestamps(logBody(t, []string{"zsh"}, tt.input))
+			if len(got) < 2 || got[0] != "# kuroko:cmd" || got[1] != tt.want {
+				t.Errorf("log = %q; want a command row %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRedactPEMBlockWithoutEndDoesNotSwallowTheSession(t *testing.T) {
 	// Arrange: `head -2` prints the BEGIN line but never the END line.
 	input := strings.Join([]string{
@@ -172,39 +213,106 @@ func TestRedactLeavesOrdinaryDeviceOutputAlone(t *testing.T) {
 	}
 }
 
-func TestRotateRemovesAbandonedLogWithoutFooter(t *testing.T) {
-	// Arrange: a session that died without writing its footer (SIGKILL,
-	// crash), so nothing holds the lock any more.
-	root := t.TempDir()
+// writeFooterlessLog writes a session log that has a header but no
+// completion footer and holds no lock — what a killed session, or one still
+// running under an older kuroko that did not lock its log, leaves behind —
+// and dates it idle ago.
+func writeFooterlessLog(t *testing.T, root, name string, size int, idle time.Duration) string {
+	t.Helper()
 	dir := filepath.Join(root, "ssh", "router")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	abandoned := filepath.Join(dir, "20200101_000000_ssh_router.log")
-	header := "# kuroko session log\n# Started : 2020-01-01T00:00:00Z\n# Command : ssh router\n# Target  : router\n# " + strings.Repeat("-", 68) + "\n\noutput\n"
-	if err := os.WriteFile(abandoned, []byte(header), 0o600); err != nil {
+	path := filepath.Join(dir, name)
+	header := "# kuroko session log\n# Started : 2020-01-01T00:00:00Z\n# Command : ssh router\n# Target  : router\n# " + strings.Repeat("-", 68) + "\n\n"
+	if err := os.WriteFile(path, []byte(header+strings.Repeat("x", size)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	recent := filepath.Join(dir, "20200102_000000_ssh_router.log")
-	if err := os.WriteFile(recent, []byte(header), 0o600); err != nil {
+	mtime := time.Now().Add(-idle)
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
 		t.Fatal(err)
 	}
-	old := time.Now().Add(-40 * 24 * time.Hour)
-	if err := os.Chtimes(abandoned, old, old); err != nil {
-		t.Fatal(err)
-	}
+	return path
+}
 
-	// Act
+func TestRotateByAgeRemovesAbandonedLogWithoutFooter(t *testing.T) {
+	root := t.TempDir()
+	abandoned := writeFooterlessLog(t, root, "20200101_000000_ssh_router.log", 10, 40*24*time.Hour)
+
 	if err := RotateLogs(root, 30, 0); err != nil {
 		t.Fatal(err)
 	}
 
-	// Assert
 	if _, err := os.Stat(abandoned); !os.IsNotExist(err) {
 		t.Error("abandoned footer-less log was not rotated")
 	}
-	if _, err := os.Stat(recent); err != nil {
-		t.Error("recently written footer-less log was removed; it may belong to a running legacy session")
+}
+
+func TestRotateBySizeTreatsFooterlessLogByIdleTime(t *testing.T) {
+	tests := []struct {
+		name        string
+		idle        time.Duration
+		wantRemoved bool
+	}{
+		{"written recently: may be a running legacy session", 2 * time.Hour, false},
+		{"just under the threshold", abandonedLogAge - time.Minute, false},
+		{"idle past the threshold: abandoned", abandonedLogAge + time.Hour, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Arrange: one footer-less log alone exceeds the 1 MiB limit, so
+			// size rotation must decide whether it may be removed.
+			root := t.TempDir()
+			path := writeFooterlessLog(t, root, "20200101_000000_ssh_router.log", 2<<20, tt.idle)
+
+			// Act
+			if err := RotateLogs(root, 0, 1); err != nil {
+				t.Fatal(err)
+			}
+
+			// Assert
+			_, err := os.Stat(path)
+			if removed := os.IsNotExist(err); removed != tt.wantRemoved {
+				t.Errorf("removed = %v; want %v", removed, tt.wantRemoved)
+			}
+		})
+	}
+}
+
+func TestActiveLog(t *testing.T) {
+	root := t.TempDir()
+	footerless := writeFooterlessLog(t, root, "a.log", 10, 0)
+	closed, err := New(root, []string{"ssh", "closed"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := closed.Close(0); err != nil {
+		t.Fatal(err)
+	}
+	locked, err := New(root, []string{"ssh", "locked"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer locked.Close(0)
+
+	tests := []struct {
+		name string
+		path string
+		idle time.Duration
+		want bool
+	}{
+		{"locked by a running session, however old", locked.Path, 365 * 24 * time.Hour, true},
+		{"footer-less and recent", footerless, time.Hour, true},
+		{"footer-less and idle past the threshold", footerless, abandonedLogAge, false},
+		{"closed with a footer", closed.Path, time.Hour, false},
+		{"missing file", filepath.Join(root, "missing.log"), time.Hour, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := activeLog(tt.path, tt.idle); got != tt.want {
+				t.Errorf("activeLog() = %v; want %v", got, tt.want)
+			}
+		})
 	}
 }
 

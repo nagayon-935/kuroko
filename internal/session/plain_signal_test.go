@@ -174,3 +174,61 @@ func TestRunDoesNotWaitForStartNotificationBeforeCommand(t *testing.T) {
 		t.Error("NotifyEnd was not called")
 	}
 }
+
+func TestWaitResultReportsSignalDeathAs128PlusSignal(t *testing.T) {
+	// Arrange: a child that dies of SIGTERM.
+	err := exec.Command("sh", "-c", "kill -TERM $$").Run()
+
+	// Act
+	code, gotErr := waitResult(err)
+
+	// Assert
+	if gotErr != nil {
+		t.Fatalf("waitResult error = %v; want nil", gotErr)
+	}
+	if want := 128 + int(syscall.SIGTERM); code != want {
+		t.Errorf("exit code = %d; want %d (not -1, which os.Exit turns into 255)", code, want)
+	}
+}
+
+func TestRunReportsTheHandledSignalWhenTheNormalPathFinishesFirst(t *testing.T) {
+	// Arrange: the signal handler has published its code, but the child
+	// (which trapped the signal) exits 0 and Run's normal path reaches
+	// finish before the handler does.
+	cfg := &config.Config{LogDir: t.TempDir()}
+	s, err := New(cfg, []string{"true"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := 128 + int(syscall.SIGTERM)
+	s.signalExit.Store(int32(want))
+
+	// Act
+	code, err := s.Run()
+
+	// Assert
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != want {
+		t.Errorf("Run() = %d; want the handled signal's %d", code, want)
+	}
+	data, err := os.ReadFile(s.log.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if footer := fmt.Sprintf("# Exit    : %d", want); !strings.Contains(string(data), footer) {
+		t.Errorf("log footer does not record the signal; want %q in:\n%s", footer, data)
+	}
+}
+
+func TestTerminateForSignalKeepsTheFirstSignal(t *testing.T) {
+	s := newTestSession(t)
+
+	first := s.terminateForSignal(syscall.SIGTERM, nil)
+	_ = s.terminateForSignal(syscall.SIGHUP, nil)
+
+	if got := int(s.signalExit.Load()); got != first {
+		t.Errorf("signalExit = %d; want the first signal's %d", got, first)
+	}
+}

@@ -13,6 +13,11 @@ import (
 // the actual text.
 const wideContinuation rune = 0
 
+// gapCell marks a column that was skipped over by cursor movement (CSI C)
+// and never written. It renders as a space, but unlike a written space it
+// shows where separately drawn text begins — see lineBuffer.text.
+const gapCell rune = -1
+
 // lineBuffer models the terminal row currently being written: one cell per
 // display column (wide runes occupy two; see wideContinuation) and the cursor
 // column within it.
@@ -32,18 +37,28 @@ type lineBuffer struct {
 //
 // Once the cursor has stepped left inside the row, the text to its right is
 // still on screen and belongs to the line — the user moved the cursor back
-// into a command and pressed Enter there — so the whole row is rendered.
-// Only trailing blanks right of the cursor are dropped: they are what
-// "\b \b" leaves behind when erasing the last character.
+// into a command and pressed Enter there — so the row is rendered past the
+// cursor, up to the first gap (columns skipped by CSI C and never written)
+// at or after it. A right-aligned prompt (zsh RPROMPT) is drawn exactly that
+// way: the shell jumps right, prints it, and jumps back, so the gap keeps it
+// out of the command line. Trailing blanks right of the cursor are dropped
+// too: they are what "\b \b" leaves behind when erasing the last character.
 func (b *lineBuffer) text() []byte {
 	end := min(b.col, len(b.cells))
 	if b.steppedBack {
-		end = len(b.cells)
+		for end < len(b.cells) && b.cells[end] != gapCell {
+			end++
+		}
 		for end > b.col && b.cells[end-1] == ' ' {
 			end--
 		}
 	}
 	return renderLine(b.cells[:end])
+}
+
+// textToCursor renders the row up to the cursor, whatever lies right of it.
+func (b *lineBuffer) textToCursor() []byte {
+	return renderLine(b.cells[:min(b.col, len(b.cells))])
 }
 
 // reset empties the row and returns the cursor to column 0.
@@ -140,7 +155,7 @@ func (b *lineBuffer) put(r rune) {
 // space so column alignment is preserved.
 func (b *lineBuffer) setCell(col int, r rune) {
 	for len(b.cells) < col {
-		b.cells = append(b.cells, ' ')
+		b.cells = append(b.cells, gapCell)
 	}
 	if col < len(b.cells) {
 		if b.cells[col] == wideContinuation && col > 0 {
@@ -156,14 +171,18 @@ func (b *lineBuffer) setCell(col int, r rune) {
 }
 
 // renderLine reassembles the text represented by a column-indexed cell
-// slice, skipping wideContinuation placeholder cells. It is the inverse of
+// slice, skipping wideContinuation placeholder cells and rendering gaps as
+// spaces. It is the inverse of
 // lineBuffer.put, which spreads one rune across 1 or 2 columns.
 func renderLine(cells []rune) []byte {
 	var buf bytes.Buffer
 	buf.Grow(len(cells))
 	for _, r := range cells {
-		if r == wideContinuation {
+		switch r {
+		case wideContinuation:
 			continue
+		case gapCell:
+			r = ' '
 		}
 		buf.WriteRune(r)
 	}
