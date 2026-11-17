@@ -119,6 +119,8 @@ func (w *rowWindow) flush() error {
 	return nil
 }
 
+var newline = []byte{'\n'}
+
 // write outputs one row (and its optional metadata line).
 func (w *rowWindow) write(row pendingRow) error {
 	if len(row.meta) > 0 {
@@ -126,6 +128,9 @@ func (w *rowWindow) write(row pendingRow) error {
 			return err
 		}
 	}
-	_, err := w.out.Write(append(row.text, '\n'))
+	if _, err := w.out.Write(row.text); err != nil {
+		return err
+	}
+	_, err := w.out.Write(newline)
 	return err
 }

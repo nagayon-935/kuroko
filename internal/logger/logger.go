@@ -1,7 +1,7 @@
 package logger
 
 import (
-	"bytes"
+	"bufio"
 	"errors"
 	"fmt"
 	"os"
@@ -24,7 +24,8 @@ import (
 type Logger struct {
 	mu           sync.Mutex // guards writes, terminal state, and closure
 	file         *os.File
-	rawFile      *os.File // non-nil when KUROKO_RAW_DEBUG=1; receives raw PTY bytes
+	buf          *bufio.Writer // sits between the terminal and file; flushed at the end of every Write
+	rawFile      *os.File      // non-nil when KUROKO_RAW_DEBUG=1; receives raw PTY bytes
 	Path         string
 	writeSeq     uint64    // monotonic counter for raw debug chunks
 	seqBuf       []byte    // incomplete escape sequence carried across Write calls
@@ -35,6 +36,12 @@ type Logger struct {
 	closeErr     error
 	writeErr     error
 }
+
+// writeBufferSize is the size of the buffer between the row window and the
+// log file. Rows are small, so writing each one straight to the file costs a
+// syscall per line; the buffer is flushed after every Write, which keeps the
+// file as current as before.
+const writeBufferSize = 64 << 10
 
 func New(logDir string, args []string, redactionEnabled bool) (*Logger, error) {
 	if info, err := os.Stat(logDir); err != nil || !info.IsDir() {
@@ -70,11 +77,13 @@ func New(logDir string, args []string, redactionEnabled bool) (*Logger, error) {
 		return nil, err
 	}
 
+	buf := bufio.NewWriterSize(f, writeBufferSize)
 	l := &Logger{
 		file:         f,
+		buf:          buf,
 		Path:         path,
 		logAltScreen: len(args) > 0 && filepath.Base(args[0]) == "screen",
-		term:         newTerminal(f, redactionEnabled, isNetworkSessionCommand(args)),
+		term:         newTerminal(buf, redactionEnabled, isNetworkSessionCommand(args)),
 	}
 
 	// The raw debug file holds the PTY stream before redaction, so it is
@@ -123,7 +132,12 @@ func (l *Logger) Write(p []byte) (int, error) {
 		data = data[:len(data)-n]
 	}
 
+	// Flush even after a failed write so rows that did reach the buffer are
+	// not held back; the first error wins.
 	err := l.writeFiltered(data)
+	if ferr := l.buf.Flush(); err == nil {
+		err = ferr
+	}
 	if err != nil && l.writeErr == nil {
 		l.writeErr = err
 	}
@@ -131,14 +145,14 @@ func (l *Logger) Write(p []byte) (int, error) {
 }
 
 // writeFiltered handles alternate-screen suppression.
-// Full-screen apps (vim, less, htop) bracket their output with \x1b[?1049h
-// (enter) and \x1b[?1049l (exit).  While in alternate-screen mode the raw
+// Full-screen apps (vim, less, htop) bracket their output with
+// \x1b[?1049h / \x1b[?1047h / \x1b[?47h (enter) and the matching ...l (exit).  While in alternate-screen mode the raw
 // PTY stream produces garbled content, so we suppress it. When wrapping
 // screen itself, this mode contains the connection's output and must be logged.
 func (l *Logger) writeFiltered(data []byte) error {
 	for len(data) > 0 {
 		if !l.altScreen {
-			idx := bytes.Index(data, enterAltScreen)
+			idx, n := indexAny(data, enterAltScreen)
 			if idx < 0 {
 				return l.term.feed(normalizeLineEndings(data))
 			}
@@ -147,9 +161,9 @@ func (l *Logger) writeFiltered(data []byte) error {
 			}
 			// Consume the transition; screen sessions keep the output inside it.
 			l.altScreen = true
-			data = data[idx+len(enterAltScreen):]
+			data = data[idx+n:]
 		} else {
-			idx := bytes.Index(data, exitAltScreen)
+			idx, n := indexAny(data, exitAltScreen)
 			if idx < 0 {
 				if l.logAltScreen {
 					return l.term.feed(normalizeLineEndings(data))
@@ -162,7 +176,7 @@ func (l *Logger) writeFiltered(data []byte) error {
 				}
 			}
 			l.altScreen = false
-			data = data[idx+len(exitAltScreen):]
+			data = data[idx+n:]
 		}
 	}
 	return nil
@@ -186,6 +200,11 @@ func (l *Logger) Close(exitCode int) error {
 func (l *Logger) doClose(exitCode int) (err error) {
 	// Release both files even when flushing the buffered output fails.
 	defer func() {
+		if err != nil {
+			// Best effort: get whatever is buffered into the file. The
+			// failure that brought us here is already in err.
+			_ = l.buf.Flush()
+		}
 		err = errors.Join(err, l.file.Close())
 		if l.rawFile != nil {
 			err = errors.Join(err, l.rawFile.Close())
@@ -213,7 +232,10 @@ func (l *Logger) doClose(exitCode int) (err error) {
 		time.Now().Format(time.RFC3339Nano),
 		exitCode,
 	)
-	if _, err := l.file.WriteString(footer); err != nil {
+	if _, err := l.buf.WriteString(footer); err != nil {
+		return err
+	}
+	if err := l.buf.Flush(); err != nil {
 		return err
 	}
 	// Make the finished log durable before reporting it saved: closing the
@@ -233,7 +255,11 @@ func (l *Logger) SetScreenRows(rows int) {
 	if l.closed {
 		return
 	}
-	if err := l.term.rows.setLimit(rows); err != nil && l.writeErr == nil {
+	err := l.term.rows.setLimit(rows)
+	if ferr := l.buf.Flush(); err == nil {
+		err = ferr
+	}
+	if err != nil && l.writeErr == nil {
 		l.writeErr = err
 	}
 }
