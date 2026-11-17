@@ -45,6 +45,46 @@ type gzipLog struct {
 
 func (g *gzipLog) Close() error { return errors.Join(g.Reader.Close(), g.file.Close()) }
 
+// headerComment returns the gzip header comment of the first member.
+func (g *gzipLog) headerComment() string { return g.Header.Comment }
+
+const (
+	summaryCommentPrefix = "kuroko-summary ended="
+	summaryCommentExit   = " exit="
+	// maxSummaryComment bounds untrusted comment input; a valid comment is
+	// well under 100 bytes.
+	maxSummaryComment = 128
+)
+
+// parseSummaryComment parses the footer data stored in a gzip header comment:
+//
+//	kuroko-summary ended=<RFC3339Nano time> exit=<decimal exit code>
+//
+// The comment is untrusted input, so anything that deviates from the format
+// yields ok=false and the caller falls back to reading the footer itself.
+func parseSummaryComment(comment string) (ended time.Time, exit int, ok bool) {
+	if len(comment) > maxSummaryComment {
+		return time.Time{}, 0, false
+	}
+	rest, found := strings.CutPrefix(comment, summaryCommentPrefix)
+	if !found {
+		return time.Time{}, 0, false
+	}
+	endedStr, exitStr, found := strings.Cut(rest, summaryCommentExit)
+	if !found {
+		return time.Time{}, 0, false
+	}
+	ended, err := time.Parse(time.RFC3339Nano, endedStr)
+	if err != nil {
+		return time.Time{}, 0, false
+	}
+	exit, err = strconv.Atoi(exitStr)
+	if err != nil || strconv.Itoa(exit) != exitStr {
+		return time.Time{}, 0, false
+	}
+	return ended, exit, true
+}
+
 // Summary is read from the session header and footer, rather than from
 // filesystem modification times, which change when logs are copied.
 type Summary struct {
@@ -122,6 +162,13 @@ func ReadSummary(path string) (Summary, error) {
 		return Summary{}, err
 	}
 	s := parseHeader(head)
+	if g, isGzip := r.(*gzipLog); isGzip {
+		if ended, code, ok := parseSummaryComment(g.headerComment()); ok {
+			s.Ended = ended
+			s.ExitCode = &code
+			return s, nil
+		}
+	}
 	tail := head
 	if f, ok := r.(*os.File); ok {
 		if len(head) == metadataWindow {
