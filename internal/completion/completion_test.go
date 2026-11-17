@@ -33,13 +33,13 @@ func TestCandidates(t *testing.T) {
 		{
 			name: "empty context lists subcommands and global flags",
 			ctx:  nil,
-			want: []string{"logs", "view", "export", "migrate", "help", "completion",
+			want: []string{"logs", "view", "export", "migrate", "grep", "help", "completion",
 				"--log-dir", "-d", "--help", "-h", "--version", "-v"},
 		},
 		{
 			name: "view lists log files from configured log dir",
 			ctx:  []string{"view"},
-			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log", "--last"},
+			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log", "--last", "--follow", "-f"},
 		},
 		{
 			name: "logs offers storage info",
@@ -64,17 +64,17 @@ func TestCandidates(t *testing.T) {
 		{
 			name: "--log-dir=DIR single token redirects view completion",
 			ctx:  []string{"--log-dir=" + otherDir, "view"},
-			want: []string{"20260101_010000_bash.log", "--last"},
+			want: []string{"20260101_010000_bash.log", "--last", "--follow", "-f"},
 		},
 		{
 			name: "--log-dir = DIR split by COMP_WORDBREAKS redirects view completion",
 			ctx:  []string{"--log-dir", "=", otherDir, "view"},
-			want: []string{"20260101_010000_bash.log", "--last"},
+			want: []string{"20260101_010000_bash.log", "--last", "--follow", "-f"},
 		},
 		{
 			name: "single-dash -log-dir form redirects view completion",
 			ctx:  []string{"-log-dir", otherDir, "view"},
-			want: []string{"20260101_010000_bash.log", "--last"},
+			want: []string{"20260101_010000_bash.log", "--last", "--follow", "-f"},
 		},
 		{
 			name: "help flag short-circuits: main prints usage and exits",
@@ -89,27 +89,27 @@ func TestCandidates(t *testing.T) {
 		{
 			name: "help flag explicitly set false does not short-circuit",
 			ctx:  []string{"--help=false", "view"},
-			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log", "--last"},
+			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log", "--last", "--follow", "-f"},
 		},
 		{
 			name: "empty log-dir value falls back to configured dir (like config.Load)",
 			ctx:  []string{"--log-dir=", "view"},
-			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log", "--last"},
+			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log", "--last", "--follow", "-f"},
 		},
 		{
 			name: "last log-dir wins, and an empty last value means configured dir",
 			ctx:  []string{"-d", otherDir, "-d=", "view"},
-			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log", "--last"},
+			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log", "--last", "--follow", "-f"},
 		},
 		{
 			name: "last non-empty log-dir wins",
 			ctx:  []string{"-d", "/nonexistent", "-d", otherDir, "view"},
-			want: []string{"20260101_010000_bash.log", "--last"},
+			want: []string{"20260101_010000_bash.log", "--last", "--follow", "-f"},
 		},
 		{
 			name: "double dash terminates flags",
 			ctx:  []string{"--", "view"},
-			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log", "--last"},
+			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log", "--last", "--follow", "-f"},
 		},
 		{
 			name: "completion subcommand lists supported shells",
@@ -119,7 +119,7 @@ func TestCandidates(t *testing.T) {
 		{
 			name: "log-dir override redirects view completion",
 			ctx:  []string{"-d", otherDir, "view"},
-			want: []string{"20260101_010000_bash.log", "--last"},
+			want: []string{"20260101_010000_bash.log", "--last", "--follow", "-f"},
 		},
 		{
 			name: "unknown leading word (wrapped command) yields no candidates",
@@ -164,11 +164,66 @@ func TestWriteScript(t *testing.T) {
 		}
 	})
 
-	for _, shell := range []string{"zsh", "fish"} {
-		t.Run(shell+" is not yet supported", func(t *testing.T) {
+	for _, tt := range []struct{ shell, header, marker string }{
+		{"zsh", "#compdef kuroko", "compdef _kuroko kuroko"},
+		{"fish", "# fish completion for kuroko", "complete -c kuroko"},
+	} {
+		t.Run(tt.shell+" script is served", func(t *testing.T) {
 			var buf strings.Builder
-			if err := WriteScript(&buf, shell); err == nil {
-				t.Fatalf("WriteScript(%s) expected error, got nil", shell)
+			if err := WriteScript(&buf, tt.shell); err != nil {
+				t.Fatalf("WriteScript(%s) error = %v", tt.shell, err)
+			}
+			out := buf.String()
+			if !strings.HasPrefix(out, tt.header) {
+				t.Fatalf("%s script does not start with %q:\n%.80s", tt.shell, tt.header, out)
+			}
+			if !strings.Contains(out, tt.marker) {
+				t.Fatalf("%s script missing %q", tt.shell, tt.marker)
+			}
+		})
+	}
+
+	t.Run("unknown shell is an error", func(t *testing.T) {
+		var buf strings.Builder
+		if err := WriteScript(&buf, "tcsh"); err == nil {
+			t.Fatal("WriteScript(tcsh) expected error, got nil")
+		}
+		if buf.Len() != 0 {
+			t.Fatalf("unknown shell wrote output: %q", buf.String())
+		}
+	})
+}
+
+func TestGrepAndViewFollowCandidates(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "session.log"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{LogDir: dir}
+	for _, tt := range []struct {
+		name string
+		ctx  []string
+		want []string
+	}{
+		{"grep offers its flags", []string{"grep"}, []string{"-i", "-l"}},
+		{"grep drops a flag already given", []string{"grep", "-i"}, []string{"-l"}},
+		{"grep offers nothing once both flags are given", []string{"grep", "-i", "-l"}, nil},
+		{"grep pattern is free text: nothing after it", []string{"grep", "error"}, nil},
+		{"grep flags after the pattern are not offered", []string{"grep", "-i", "error"}, nil},
+		{"grep after -- takes a pattern", []string{"grep", "--"}, nil},
+		{"grep honours global log-dir flags before it", []string{"-d", dir, "grep"}, []string{"-i", "-l"}},
+		{"view offers --follow with --last and files", []string{"view"}, []string{"session.log", "--last", "--follow", "-f"}},
+		{"after --follow files and --last are offered", []string{"view", "--follow"}, []string{"session.log", "--last"}},
+		{"after -f files and --last are offered", []string{"view", "-f"}, []string{"session.log", "--last"}},
+		{"after --last only --follow remains", []string{"view", "--last"}, []string{"--follow", "-f"}},
+		{"after --follow --last nothing remains", []string{"view", "--follow", "--last"}, nil},
+		{"after --last --follow nothing remains", []string{"view", "--last", "-f"}, nil},
+		{"after --follow and a file nothing remains", []string{"view", "--follow", "session.log"}, nil},
+		{"unknown view flag stops completion", []string{"view", "--bogus"}, nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := Candidates(tt.ctx, cfg, ""); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("Candidates(%v) = %v, want %v", tt.ctx, got, tt.want)
 			}
 		})
 	}
@@ -213,7 +268,7 @@ func TestNestedStorageCompletion(t *testing.T) {
 		ctx  []string
 		want []string
 	}{
-		{[]string{"view"}, []string{relative, "--last"}},
+		{[]string{"view"}, []string{relative, "--last", "--follow", "-f"}},
 		{[]string{"logs"}, []string{"--info"}},
 		{[]string{"logs", "--info"}, nil},
 		{[]string{"migrate"}, []string{"--from"}},
