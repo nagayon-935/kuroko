@@ -35,6 +35,11 @@ var wideRanges = []struct{ lo, hi rune }{
 // and 1 for everything else (including East Asian "ambiguous width"
 // characters, which are rendered narrow by convention).
 func Rune(r rune) int {
+	// Printable ASCII is by far the most common input and is never a
+	// control, combining or wide character; skip the table lookups for it.
+	if r >= 0x20 && r < 0x7f {
+		return 1
+	}
 	if r == 0 || unicode.IsControl(r) {
 		return 0
 	}

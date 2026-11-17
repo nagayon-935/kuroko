@@ -13,7 +13,7 @@ import (
 
 // subcommands are the built-in kuroko subcommand words (in addition to
 // wrapping an arbitrary PATH command).
-var subcommands = []string{"logs", "view", "export", "migrate", "help", "completion"}
+var subcommands = []string{"logs", "view", "export", "migrate", "grep", "help", "completion"}
 
 // globalFlags are accepted before the subcommand/wrapped-command word.
 // Go's flag package stops parsing at the first non-flag word, so they are
@@ -34,7 +34,7 @@ var shells = []string{"bash", "zsh", "fish"}
 // builtins are the subcommand words main handles itself; any other first
 // non-flag word is a command for kuroko to wrap.
 var builtins = map[string]bool{
-	"logs": true, "view": true, "export": true, "migrate": true,
+	"logs": true, "view": true, "export": true, "migrate": true, "grep": true,
 	"help": true, "completion": true, "__complete": true,
 }
 
@@ -58,10 +58,9 @@ func Candidates(ctx []string, cfg *config.Config, home string) []string {
 	case "":
 		return append(append([]string{}, subcommands...), globalFlags...)
 	case "view":
-		if len(p.args) > 0 {
-			return nil
-		}
-		return append(logFileNames(logDir), "--last")
+		return viewCandidates(p.args, logDir)
+	case "grep":
+		return grepCandidates(p.args)
 	case "export":
 		return exportCandidates(p.args, logDir)
 	case "logs":
@@ -208,6 +207,53 @@ func exportCandidates(args []string, logDir string) []string {
 	}
 	if !hasOutput {
 		result = append(result, "--output", "-o")
+	}
+	return result
+}
+
+// viewCandidates follows view's flags, which must precede its log file
+// (flag parsing stops at the first non-flag word): --last replaces the
+// file, --follow/-f may be combined with either.
+func viewCandidates(args []string, logDir string) []string {
+	var hasLast, hasFollow bool
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") || arg == "-" || arg == "--" {
+			return nil // the log file was given (or "--" ended the flags)
+		}
+		switch strings.TrimLeft(arg, "-") {
+		case "last":
+			hasLast = true
+		case "follow", "f":
+			hasFollow = true
+		default:
+			return nil
+		}
+	}
+	var result []string
+	if !hasLast {
+		result = append(logFileNames(logDir), "--last")
+	}
+	if !hasFollow {
+		result = append(result, "--follow", "-f")
+	}
+	return result
+}
+
+// grepCandidates offers grep's flags until the pattern (free text, so never
+// completed) is typed. Flags are only recognised before the pattern.
+func grepCandidates(args []string) []string {
+	seen := map[string]bool{}
+	for _, arg := range args {
+		if arg == "--" || !strings.HasPrefix(arg, "-") || arg == "-" {
+			return nil
+		}
+		seen[strings.TrimLeft(arg, "-")] = true
+	}
+	var result []string
+	for _, f := range []string{"i", "l"} {
+		if !seen[f] {
+			result = append(result, "-"+f)
+		}
 	}
 	return result
 }

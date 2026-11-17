@@ -146,3 +146,158 @@ func TestRunReportsFailures(t *testing.T) {
 		}
 	}
 }
+
+const testFooter = "\n# --------------------------------------------------------------------\n# Ended   : 2026-06-17T18:00:00+09:00\n# Exit    : 0\n"
+
+func writeTestLog(t *testing.T, logDir, rel, content string) string {
+	t.Helper()
+	path := filepath.Join(logDir, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestRunViewFollowStreamsFinishedLog(t *testing.T) {
+	logDir := isolate(t)
+	content := "# kuroko session log\nrouter output\n" + testFooter
+	path := writeTestLog(t, logDir, "ssh/r1/20260617_180000_ssh_r1.log", content)
+
+	for _, args := range [][]string{
+		{"-d", logDir, "view", "--follow", "--last"},
+		{"-d", logDir, "view", "--last", "-f"},
+		{"-d", logDir, "view", "-f", path},
+		{"-d", logDir, "view", path, "--follow"},
+	} {
+		code, stdout, stderr := runCLI(t, args...)
+		if code != 0 || stdout != content {
+			t.Errorf("run(%q) = %d, stdout %q, stderr %q; want 0 and the log", args, code, stdout, stderr)
+		}
+	}
+}
+
+func TestRunViewFollowReportsErrors(t *testing.T) {
+	logDir := isolate(t)
+	for _, args := range [][]string{
+		{"-d", logDir, "view", "--follow"},                                  // no log argument
+		{"-d", logDir, "view", "--follow", filepath.Join(logDir, "no.log")}, // missing file
+		{"-d", logDir, "view", "--follow", "--bogus", "x.log"},              // unknown option still rejected
+	} {
+		code, _, stderr := runCLI(t, args...)
+		if code != 1 {
+			t.Errorf("run(%q) = %d, stderr %q; want 1", args, code, stderr)
+		}
+	}
+}
+
+func TestSplitFollowFlag(t *testing.T) {
+	tests := []struct {
+		name       string
+		in, want   []string
+		wantFollow bool
+	}{
+		{"long", []string{"--follow", "--last"}, []string{"--last"}, true},
+		{"short after", []string{"a.log", "-f"}, []string{"a.log"}, true},
+		{"absent", []string{"a.log"}, []string{"a.log"}, false},
+		{"after delimiter", []string{"--", "-f"}, []string{"--", "-f"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, follow := splitFollowFlag(tt.in)
+			if follow != tt.wantFollow || strings.Join(got, "|") != strings.Join(tt.want, "|") {
+				t.Fatalf("splitFollowFlag(%q) = %q, %v; want %q, %v", tt.in, got, follow, tt.want, tt.wantFollow)
+			}
+		})
+	}
+}
+
+func TestRunGrep(t *testing.T) {
+	logDir := isolate(t)
+	writeTestLog(t, logDir, "ssh/a/20260101_000000_ssh_a.log", "# kuroko:cmd:2026-01-01T00:00:00Z\nInterface DOWN\nup\n")
+	writeTestLog(t, logDir, "ssh/b/20260101_000000_ssh_b.log", "all fine\n")
+
+	tests := []struct {
+		name       string
+		args       []string
+		wantCode   int
+		wantStdout string
+		wantStderr string
+	}{
+		{"match", []string{"grep", "DOWN"}, 0, "ssh/a/20260101_000000_ssh_a.log:2:Interface DOWN\n", ""},
+		{"case sensitive miss", []string{"grep", "down"}, 1, "", ""},
+		{"ignore case", []string{"grep", "-i", "down"}, 0, "ssh/a/20260101_000000_ssh_a.log:2:Interface DOWN\n", ""},
+		{"files only", []string{"grep", "-l", "-i", "down|fine"}, 0, "ssh/a/20260101_000000_ssh_a.log\nssh/b/20260101_000000_ssh_b.log\n", ""},
+		{"no match is silent exit 1", []string{"grep", "zzz"}, 1, "", ""},
+		{"invalid regexp is exit 2", []string{"grep", "("}, 2, "", ""},
+		{"missing pattern is exit 2 with usage", []string{"grep"}, 2, "", "usage: kuroko grep"},
+		{"two patterns is exit 2 with usage", []string{"grep", "a", "b"}, 2, "", "usage: kuroko grep"},
+		{"unknown flag is exit 2", []string{"grep", "-z", "x"}, 2, "", "-z"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args := append([]string{"-d", logDir}, tt.args...)
+			code, stdout, stderr := runCLI(t, args...)
+			if code != tt.wantCode || stdout != tt.wantStdout || !strings.Contains(stderr, tt.wantStderr) {
+				t.Fatalf("run(%q) = %d, %q, %q; want %d, %q, stderr containing %q", args, code, stdout, stderr, tt.wantCode, tt.wantStdout, tt.wantStderr)
+			}
+			// fail() writes through internal/console to the real stderr, so only
+			// flag-parse errors and warnings appear in the injected writer.
+			if tt.wantStderr == "" && stderr != "" {
+				t.Fatalf("unexpected stderr %q", stderr)
+			}
+		})
+	}
+}
+
+func TestRunGrepPrintsFlagAndUsageErrorsOnce(t *testing.T) {
+	logDir := isolate(t)
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"unknown flag", []string{"grep", "-z", "x"}, "flag provided but not defined"},
+		{"missing pattern", []string{"grep"}, "usage: kuroko grep"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, stderr := runCLI(t, append([]string{"-d", logDir}, tt.args...)...)
+
+			if n := strings.Count(stderr, tt.want); n != 1 {
+				t.Fatalf("stderr has %q %d times, want once:\n%s", tt.want, n, stderr)
+			}
+		})
+	}
+}
+
+func TestRunGrepSkippedUnreadableLogIsExit2EvenWhenOthersMatch(t *testing.T) {
+	logDir := isolate(t)
+	writeTestLog(t, logDir, "ssh/a/20260101_000000_ssh_a.log.gz", "this is not gzip")
+	writeTestLog(t, logDir, "ssh/b/20260101_000000_ssh_b.log", "hit\n")
+
+	code, stdout, stderr := runCLI(t, "-d", logDir, "grep", "hit")
+
+	if code != 2 || stdout != "ssh/b/20260101_000000_ssh_b.log:1:hit\n" || !strings.Contains(stderr, "warning: skipping ssh/a/20260101_000000_ssh_a.log.gz") {
+		t.Fatalf("grep = %d, %q, %q; want 2, the match, and a skip warning", code, stdout, stderr)
+	}
+}
+
+func TestRunGrepHelpExitsZero(t *testing.T) {
+	logDir := isolate(t)
+	if code, _, stderr := runCLI(t, "-d", logDir, "grep", "-h"); code != 0 || !strings.Contains(stderr, "usage: kuroko grep") {
+		t.Fatalf("grep -h = %d, %q", code, stderr)
+	}
+}
+
+func TestUsageMentionsNewCommands(t *testing.T) {
+	isolate(t)
+	_, stdout, _ := runCLI(t, "--help")
+	for _, want := range []string{"view --follow --last", "grep -i 'error|down'", "completion <bash|zsh|fish>", "one screen"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("usage lacks %q", want)
+		}
+	}
+}

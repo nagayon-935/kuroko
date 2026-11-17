@@ -1,9 +1,25 @@
 package logger
 
+import "bytes"
+
+// Alternate-screen switches. 1049 is the modern form (vim / less / htop);
+// 47 and 1047 are the older private modes some full-screen apps still use.
 var (
-	enterAltScreen = []byte("\x1b[?1049h") // vim / less / htop enter
-	exitAltScreen  = []byte("\x1b[?1049l") // alternate screen exit
+	enterAltScreen = [][]byte{[]byte("\x1b[?1049h"), []byte("\x1b[?1047h"), []byte("\x1b[?47h")}
+	exitAltScreen  = [][]byte{[]byte("\x1b[?1049l"), []byte("\x1b[?1047l"), []byte("\x1b[?47l")}
 )
+
+// indexAny returns the position and length of the earliest occurrence in data
+// of any of seqs, or -1 when none occurs.
+func indexAny(data []byte, seqs [][]byte) (idx, n int) {
+	idx = -1
+	for _, s := range seqs {
+		if i := bytes.Index(data, s); i >= 0 && (idx < 0 || i < idx) {
+			idx, n = i, len(s)
+		}
+	}
+	return idx, n
+}
 
 // normalizeLineEndings collapses any run of \r immediately followed by \n
 // into a single \n, and leaves bare \r (not followed by \n) untouched.

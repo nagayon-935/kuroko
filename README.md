@@ -46,7 +46,7 @@ kuroko --version
 
 ### ソースからビルドする場合
 
-必要なもの: Go 1.22 以上
+必要なもの: Go 1.26 以上
 
 ```bash
 git clone https://github.com/nagayon-935/kuroko
@@ -220,6 +220,31 @@ kuroko -d ~/work/logs view --last
 保存先ルートからの相対パス（例：`kuroko view ssh/edgeSW03/session.log`）でも開けます。
 ファイル名だけの指定が複数のログに一致する場合は、候補の相対パスを案内します。
 
+#### 実行中のセッションを追従する (`--follow`)
+
+```bash
+kuroko view --follow --last      # 短縮形: kuroko view -f <logfile>
+```
+
+`tail -f` のように、ログの既存部分を標準出力へ出したあと、追記された内容を逐次表示します（TUI は開きません）。
+セッションが終了してフッターが書かれるか、`Ctrl+C` を押すと終了します。終了済みのログや gzip 圧縮ログは全文を出力してすぐ終了します。
+
+> カーソル上移動による再描画を畳み込むため、ロガーは直近のおよそ1画面分の行を保留してから書き出します。追従表示は実際の画面より最大1画面分ほど遅れます。
+
+### ログの横断検索 (`kuroko grep`)
+
+保存済みのすべてのログ（通常のログと gzip 圧縮ログ）を正規表現で検索します。
+
+```bash
+kuroko grep 'line protocol is down'
+kuroko grep -i 'error|down'        # -i: 大文字・小文字を区別しない
+kuroko grep -l 'show running'      # -l: 一致したログのファイル名だけを表示
+kuroko -d ~/work/logs grep BGP
+```
+
+パターンは Go の正規表現（RE2）です。結果は `<保存先からの相対パス>:<行番号>:<行>` の形式で、相対パスの順に出力します。
+終了コードは grep に準じ、一致があれば `0`、なければ `1`、エラー時は `2` です。読めないログは警告を出して検索を続けますが、1 件でもスキップした場合は他のログに一致があっても `2` を返します。
+
 #### キーおよびマウス操作
 
 - **共通**
@@ -264,23 +289,37 @@ kuroko export session.log.gz
 書き出したテキストにはプロンプトとコマンド・出力を含み、内部のコマンド境界メタデータや検索の色付けは含みません。
 ファイルは所有者だけが読み書きできる権限（`0600`）で作成し、既存ファイルの保存先指定はエラーにします。
 
-### シェル補完 (bash)
+### シェル補完 (bash / zsh / fish)
 
-`kuroko` のサブコマンド・オプション・`kuroko view` のログファイル名、ラップするコマンドの引数（`kuroko ssh` の接続先など）を bash の TAB 補完で入力できます。
+`kuroko` のサブコマンド・オプション・`kuroko view` のログファイル名、ラップするコマンドの引数（`kuroko ssh` の接続先など）を TAB 補完で入力できます。
 
 ```bash
-# 現在のシェルだけで有効化
+# bash: 現在のシェルだけで有効化
 # (source <(...) は macOS 標準の bash 3.2 では読み込めないため eval を使う)
 eval "$(kuroko completion bash)"
 
-# 恒久的に有効化
+# bash: 恒久的に有効化
 kuroko completion bash > ~/.local/share/bash-completion/completions/kuroko
 # または (Homebrew の bash-completion@2 を使っている場合)
 kuroko completion bash > "$(brew --prefix)/etc/bash_completion.d/kuroko"
 ```
 
+```zsh
+# zsh: ~/.zshrc の compinit より後に追加
+eval "$(kuroko completion zsh)"
+# または $fpath 上のファイルとして保存
+kuroko completion zsh > "${fpath[1]}/_kuroko"
+```
+
+```fish
+# fish
+kuroko completion fish | source
+# 恒久的に有効化
+kuroko completion fish > ~/.config/fish/completions/kuroko.fish
+```
+
 ```bash
-kuroko <TAB>          # logs / view / export / migrate / help / completion と PATH 上のコマンドを補完
+kuroko <TAB>          # logs / view / grep / export / migrate / help / completion と PATH 上のコマンドを補完
 kuroko view <TAB>     # ~/.kuroko/logs (または -d で指定したディレクトリ) のログファイル名を補完
 kuroko -<TAB>         # --log-dir / -d / --help / -h / --version / -v を補完
 kuroko ssh <TAB>      # ssh 単体と同じ補完（~/.ssh/config の Host、known_hosts、-i の鍵ファイルなど）
@@ -288,9 +327,10 @@ kuroko ssh admin@<TAB>  # user@host 形式でも Host を補完
 ```
 
 ラップするコマンド（`kuroko ssh` / `kuroko telnet` など）の引数は、bash-completion が読み込まれていればそのコマンド自身の補完に委ねます（`sudo` と同じ仕組み）。
+zsh と fish では、常にそのコマンド自身の補完に委ねます。
 bash-completion がない環境では、`kuroko ssh` には `~/.ssh/config`（`Include` 先を含む。ワイルドカードの Host は除く）の Host を、それ以外のコマンドにはファイル名を補完します。
 
-候補が1つなら自動で入力され、複数あれば一覧表示されます（bash 標準の補完動作）。
+候補が1つなら自動で入力され、複数あれば一覧表示されます（各シェル標準の補完動作）。
 
 ### ログの中身
 

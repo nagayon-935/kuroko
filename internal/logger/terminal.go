@@ -97,12 +97,19 @@ func (t *terminal) feed(data []byte) error {
 			// multi-byte character (e.g. Japanese) may be split across
 			// several PTY bytes, or even across Write() calls, since this
 			// state persists between calls.
-			t.runeBuf = append(t.runeBuf, b)
-			if !utf8.FullRune(t.runeBuf) {
-				continue
+			var r rune
+			if b < utf8.RuneSelf && len(t.runeBuf) == 0 {
+				// ASCII outside a pending multi-byte rune is a complete
+				// rune by itself: skip the buffer round trip.
+				r = rune(b)
+			} else {
+				t.runeBuf = append(t.runeBuf, b)
+				if !utf8.FullRune(t.runeBuf) {
+					continue
+				}
+				r, _ = utf8.DecodeRune(t.runeBuf)
+				t.runeBuf = t.runeBuf[:0]
 			}
-			r, _ := utf8.DecodeRune(t.runeBuf)
-			t.runeBuf = t.runeBuf[:0]
 
 			if t.pendingCR {
 				t.snapshotLine()

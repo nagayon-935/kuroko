@@ -2,8 +2,10 @@ package viewer
 
 import (
 	"fmt"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nagayon-935/kuroko/internal/config"
@@ -61,29 +63,58 @@ func (s *LogSelector) scanLogs() error {
 		return err
 	}
 
-	var items []selectorItem
-	for _, entry := range entries {
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
+	// Summaries are read by a bounded worker pool. Each result is written to
+	// its own slot, so the item order matches the entry order exactly.
+	slots := make([]*selectorItem, len(entries))
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for range min(runtime.NumCPU(), maxScanWorkers) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				slots[i] = scanEntry(entries[i])
+			}
+		}()
+	}
+	for i := range entries {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
 
-		summary, readErr := logstore.ReadSummary(entry.Path)
-		if summary.Target == "" && summary.Command != "" {
-			summary.Target = logger.TargetAddress(strings.Fields(summary.Command))
+	var items []selectorItem
+	for _, item := range slots {
+		if item != nil {
+			items = append(items, *item)
 		}
-		items = append(items, selectorItem{
-			name:      entry.RelativePath,
-			modTime:   info.ModTime(),
-			size:      info.Size(),
-			summary:   summary,
-			readError: readErr != nil,
-		})
 	}
 
 	s.items = items
 	s.applySortOrder(s.items)
 	return nil
+}
+
+const maxScanWorkers = 8
+
+// scanEntry builds the list item for one log, or nil when its file info is
+// unavailable (such entries are skipped).
+func scanEntry(entry logstore.LogFile) *selectorItem {
+	info, err := entry.Info()
+	if err != nil {
+		return nil
+	}
+	summary, readErr := logstore.ReadSummary(entry.Path)
+	if summary.Target == "" && summary.Command != "" {
+		summary.Target = logger.TargetAddress(strings.Fields(summary.Command))
+	}
+	return &selectorItem{
+		name:      entry.RelativePath,
+		modTime:   info.ModTime(),
+		size:      info.Size(),
+		summary:   summary,
+		readError: readErr != nil,
+	}
 }
 
 func (s *LogSelector) applySortOrder(items []selectorItem) {

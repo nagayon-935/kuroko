@@ -48,9 +48,20 @@ Examples:
   kuroko migrate        Verify and migrate legacy logs and config to ~/.kuroko
   kuroko view <logfile>  View a saved log session interactively
   kuroko view --last     View the most recent session
+  kuroko view --follow --last  Follow the most recent session as it runs (-f)
+  kuroko grep -i 'error|down'  Search all saved logs (-l: names only)
   kuroko export --last --command 1 -o command.txt  Export a command and output
   kuroko export <logfile>  Export an entire session to stdout
-  kuroko completion bash  Print a bash completion script
+  kuroko completion <bash|zsh|fish>  Print a shell completion script
+
+kuroko view --follow streams the log like tail -f and exits when the session
+ends or on Ctrl+C. Output trails the live session by up to about one screen
+height, because the logger holds back recent rows that cursor-up redraws may
+still rewrite.
+
+kuroko grep prints <path>:<line>:<text> per match (Go/RE2 syntax). It exits 0 if
+anything matched, 1 if nothing matched, and 2 on any error (including logs that
+could not be read).
 
 Logs are saved to ~/.kuroko/logs/ by default.
 
@@ -129,6 +140,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	case "view":
+		viewArgs, following := splitFollowFlag(rest[1:])
+		if following {
+			if err := runFollow(viewArgs, logDir, stdout); err != nil {
+				return fail("view error: %v", err)
+			}
+			return 0
+		}
 		path, err := resolveLogArgument(rest[1:], logDir)
 		if err != nil {
 			return fail("view error: %v", err)
@@ -137,6 +155,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return fail("viewer error: %v", err)
 		}
 		return 0
+	case "grep":
+		code, err := runGrep(rest[1:], logDir, stdout, stderr)
+		if err != nil {
+			fail("grep error: %v", err)
+		}
+		return code
 	case "export":
 		if err := runExport(rest[1:], logDir, stdout, stderr); err != nil {
 			return fail("export error: %v", err)

@@ -62,7 +62,7 @@ func CompressFile(srcPath string) (string, error) {
 	defer dstFile.Close()
 	defer os.Remove(dstFile.Name())
 
-	if err := compressStream(dstFile, srcFile); err != nil {
+	if err := compressStreamWithComment(dstFile, srcFile, summaryComment(srcPath)); err != nil {
 		return "", err
 	}
 
@@ -88,8 +88,25 @@ func CompressFile(srcPath string) (string, error) {
 	return dstPath, nil
 }
 
+// summaryComment builds the gzip header comment that lets readers learn how
+// a session ended without decompressing the archive. It returns "" when the
+// log has no complete footer (or cannot be read); that never blocks
+// compression.
+func summaryComment(srcPath string) string {
+	s, err := logstore.ReadSummary(srcPath)
+	if err != nil || s.ExitCode == nil || s.Ended.IsZero() {
+		return ""
+	}
+	return fmt.Sprintf("kuroko-summary ended=%s exit=%d", s.Ended.Format(time.RFC3339Nano), *s.ExitCode)
+}
+
 func compressStream(dst io.Writer, src io.Reader) error {
+	return compressStreamWithComment(dst, src, "")
+}
+
+func compressStreamWithComment(dst io.Writer, src io.Reader, comment string) error {
 	zw := gzip.NewWriter(dst)
+	zw.Comment = comment
 	_, copyErr := io.Copy(zw, src)
 	// gzip buffers data: a successful copy does not imply a successful
 	// archive until Close has written the compressed tail and checksum.
