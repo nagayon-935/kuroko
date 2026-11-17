@@ -15,7 +15,7 @@ jobs:
       matrix:
         # The minimum version in go.mod, and the current release that
         # release builds use.
-        go-version: ['1.22', 'stable']
+        go-version: ['1.26', 'stable']
 
     steps:
       - uses: actions/checkout@v4
@@ -24,6 +24,11 @@ jobs:
         with:
           go-version: ${{ matrix.go-version }}
           cache: true
+
+      # The completion script tests skip a shell that is not installed, so
+      # without these the zsh and fish scripts would go unchecked.
+      - name: Install shells for completion tests
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh fish
 
       - name: Vet
         run: go vet ./...
@@ -49,7 +54,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.26'
           cache: true
 
       - name: Check formatting
@@ -62,7 +67,7 @@ jobs:
           fi
 
       - name: Staticcheck
-        run: go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 ./...
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
 
   vulncheck:
     name: Vulnerability check
