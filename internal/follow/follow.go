@@ -45,7 +45,7 @@ func Follow(ctx context.Context, path string, w io.Writer, opt Options) error {
 		interval = DefaultInterval
 	}
 	if strings.HasSuffix(path, ".gz") {
-		return copyAll(path, w)
+		return copyAll(ctx, path, w)
 	}
 	f, err := os.Open(path)
 	if err != nil {
@@ -146,14 +146,30 @@ func appendTail(tail, p []byte) []byte {
 	return tail
 }
 
-func copyAll(path string, w io.Writer) error {
+func copyAll(ctx context.Context, path string, w io.Writer) error {
 	r, err := logstore.Open(path)
 	if err != nil {
 		return fmt.Errorf("opening log: %w", err)
 	}
 	defer r.Close()
-	if _, err := io.Copy(w, r); err != nil {
-		return fmt.Errorf("copying log: %w", err)
+	buf := make([]byte, 32*1024)
+	for ctx.Err() == nil {
+		n, rerr := r.Read(buf)
+		if n > 0 {
+			written, err := w.Write(buf[:n])
+			if err != nil {
+				return fmt.Errorf("copying log: %w", err)
+			}
+			if written != n {
+				return fmt.Errorf("copying log: %w", io.ErrShortWrite)
+			}
+		}
+		if rerr == io.EOF {
+			return nil
+		}
+		if rerr != nil {
+			return fmt.Errorf("copying log: %w", rerr)
+		}
 	}
 	return nil
 }
