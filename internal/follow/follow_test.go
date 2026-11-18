@@ -156,9 +156,9 @@ func TestFollowFinishesCleanlyWhenFileIsRemoved(t *testing.T) {
 	}
 }
 
-func TestFollowGzipLogIsCopiedOnce(t *testing.T) {
+func writeGzipLog(t *testing.T, content string) string {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "a.log.gz")
-	content := header + "zipped\n"
 	var raw bytes.Buffer
 	zw := gzip.NewWriter(&raw)
 	if _, err := zw.Write([]byte(content)); err != nil {
@@ -168,12 +168,50 @@ func TestFollowGzipLogIsCopiedOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFile(t, path, raw.String())
+	return path
+}
+
+func TestFollowGzipLogIsCopiedOnce(t *testing.T) {
+	content := header + "zipped\n"
+	path := writeGzipLog(t, content)
 	var out syncBuffer
 
 	err := Follow(context.Background(), path, &out, Options{})
 
 	if err != nil || out.String() != content {
 		t.Fatalf("Follow(gz) = %v, %q; want nil, %q", err, out.String(), content)
+	}
+}
+
+func TestFollowGzipCancellation(t *testing.T) {
+	content := header + strings.Repeat("0123456789abcdef\n", 256*1024)
+	path := writeGzipLog(t, content)
+	for _, tt := range []struct {
+		name         string
+		cancelBefore bool
+		wantMinBytes int
+		wantMaxBytes int
+	}{
+		{"already cancelled", true, 0, 0},
+		{"cancel after first write", false, 1, 32 * 1024},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			w := &cancelWriter{cancel: cancel}
+			if tt.cancelBefore {
+				cancel()
+			}
+
+			err := Follow(ctx, path, w, Options{})
+
+			if err != nil {
+				t.Fatalf("Follow() = %v; want nil", err)
+			}
+			if w.n < tt.wantMinBytes || w.n > tt.wantMaxBytes {
+				t.Fatalf("wrote %d of %d bytes; want %d..%d", w.n, len(content), tt.wantMinBytes, tt.wantMaxBytes)
+			}
+		})
 	}
 }
 
