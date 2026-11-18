@@ -1,6 +1,8 @@
 package viewer
 
 import (
+	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +20,16 @@ func (v *Viewer) selectionText() ([]byte, error) {
 		return nil, fmt.Errorf("no selected command or session")
 	}
 	idx := v.filteredIdx[v.selected]
+	data, err := v.commandRange(idx)
+	if err != nil {
+		return nil, err
+	}
+	var out bytes.Buffer
+	err = writeFiltered(bytes.NewReader(data), &out)
+	return out.Bytes(), err
+}
+
+func (v *Viewer) commandRange(idx int) ([]byte, error) {
 	if idx < 0 || idx >= len(v.allCmds) {
 		return nil, fmt.Errorf("invalid command selection")
 	}
@@ -34,36 +46,67 @@ func (v *Viewer) selectionText() ([]byte, error) {
 	if start < 0 || start > end || end > int64(len(v.logData)) {
 		return nil, fmt.Errorf("invalid command offsets")
 	}
-	lines := strings.Split(string(v.logData[start:end]), "\n")
-	filtered := lines[:0]
-	for _, line := range lines {
-		if !strings.HasPrefix(line, "# kuroko:cmd:") {
-			filtered = append(filtered, line)
+	return v.logData[start:end], nil
+}
+
+// writeFiltered joins retained lines with LF. Delaying the separator until
+// the next retained line also handles a final metadata line without an LF.
+func writeFiltered(r io.Reader, w io.Writer) error {
+	in := bufio.NewReader(r)
+	out := bufio.NewWriter(w)
+	var haveLine, continued, skip bool
+	for {
+		part, err := in.ReadSlice('\n')
+		if err != nil && err != io.EOF && err != bufio.ErrBufferFull {
+			return fmt.Errorf("reading log data: %w", err)
 		}
+		if !continued {
+			// The prefix fits in the first fragment even for very long lines.
+			skip = bytes.HasPrefix(part, []byte("# kuroko:cmd:"))
+			if !skip {
+				if haveLine {
+					if err := out.WriteByte('\n'); err != nil {
+						return err
+					}
+				}
+				haveLine = true
+			}
+		}
+		if !skip {
+			if _, err := out.Write(bytes.TrimSuffix(part, []byte{'\n'})); err != nil {
+				return err
+			}
+		}
+		if err == io.EOF {
+			return out.Flush()
+		}
+		continued = err == bufio.ErrBufferFull
 	}
-	return []byte(strings.Join(filtered, "\n")), nil
 }
 
 // Export writes a session (command=0) or a one-based command and its output.
 // It supports both current and older metadata formats and compressed logs.
 func Export(logPath string, command int, w io.Writer) error {
-	v, err := newViewer(logPath)
+	if command == 0 {
+		r, err := logstore.Open(logPath)
+		if err != nil {
+			return fmt.Errorf("opening log file: %w", err)
+		}
+		defer r.Close()
+		return writeFiltered(r, w)
+	}
+	v, err := loadSession(logPath)
 	if err != nil {
 		return err
 	}
 	if command < 0 || command >= len(v.allCmds) {
 		return fmt.Errorf("command %d not found (this log has %d commands)", command, len(v.allCmds)-1)
 	}
-	v.selected = command
-	data, err := v.selectionText()
+	data, err := v.commandRange(command)
 	if err != nil {
 		return err
 	}
-	n, err := w.Write(data)
-	if err == nil && n != len(data) {
-		err = io.ErrShortWrite
-	}
-	return err
+	return writeFiltered(bytes.NewReader(data), w)
 }
 
 // ExportToFile never overwrites a log or an existing user file.

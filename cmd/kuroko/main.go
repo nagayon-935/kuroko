@@ -52,6 +52,7 @@ Examples:
   kuroko grep -i 'error|down'  Search all saved logs (-l: names only)
   kuroko export --last --command 1 -o command.txt  Export a command and output
   kuroko export <logfile>  Export an entire session to stdout
+  kuroko config check   Show effective settings and report configuration issues
   kuroko completion <bash|zsh|fish>  Print a shell completion script
 
 kuroko view --follow streams the log like tail -f and exits when the session
@@ -166,6 +167,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return fail("export error: %v", err)
 		}
 		return 0
+	case "config":
+		if len(rest) != 2 || rest[1] != "check" {
+			return fail("usage: kuroko config check")
+		}
+		return runConfigCheck(logDir, stdout)
 	case "completion":
 		shell := "bash"
 		if len(rest) >= 2 {
@@ -179,12 +185,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		// Hidden helper invoked by the shell completion script; not
 		// listed in usage. rest[1:] is the already-typed context
 		// (kuroko itself and the word under the cursor excluded).
-		cfg, err := config.Resolve(config.Options{LogDir: logDir})
+		report, err := config.Inspect(config.Options{LogDir: logDir})
 		if err != nil {
 			return 0 // completion must never surface errors to the shell
 		}
 		home, _ := os.UserHomeDir() // "" just skips ~/.ssh/config hosts
-		_ = completion.Write(stdout, rest[1:], cfg, home)
+		_ = completion.Write(stdout, rest[1:], report.Config, home)
 		return 0
 	}
 

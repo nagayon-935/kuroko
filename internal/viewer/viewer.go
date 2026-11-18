@@ -66,6 +66,16 @@ func Run(logPath string) error {
 }
 
 func newViewer(logPath string) (*Viewer, error) {
+	v, err := loadSession(logPath)
+	if err != nil {
+		return nil, err
+	}
+	v.updateFilter()
+	v.updateOutput()
+	return v, nil
+}
+
+func loadSession(logPath string) (*Viewer, error) {
 	r, err := logstore.Open(logPath)
 	if err != nil {
 		return nil, fmt.Errorf("opening log file: %w", err)
@@ -85,8 +95,6 @@ func newViewer(logPath string) (*Viewer, error) {
 
 	v.parseMetadata()
 	v.allCmds = append([]CommandMetadata{{Command: "Entire session", WholeSession: true}}, v.allCmds...)
-	v.updateFilter()
-	v.updateOutput()
 	return v, nil
 }
 

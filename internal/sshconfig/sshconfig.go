@@ -274,13 +274,15 @@ func ValidHost(host string) bool {
 // sshValueOptions are the ssh(1) single-letter options that take a value.
 const sshValueOptions = "BbcDEeFIiJLlmOoPpQRSWw"
 
+// ValueOptionIndex returns the byte index of the first value-taking option
+// in a getopt cluster (dash stripped), or -1 if there is none.
+func ValueOptionIndex(cluster string) int {
+	return strings.IndexAny(cluster, sshValueOptions)
+}
+
 // OptionAwaitsValue reports whether the getopt cluster (dash stripped)
 // ends in a value-taking ssh(1) option whose value is in the next argument.
 func OptionAwaitsValue(cluster string) bool {
-	for i, c := range cluster {
-		if strings.ContainsRune(sshValueOptions, c) {
-			return i == len(cluster)-1
-		}
-	}
-	return false
+	i := ValueOptionIndex(cluster)
+	return i >= 0 && i == len(cluster)-1
 }

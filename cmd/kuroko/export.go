@@ -16,13 +16,17 @@ import (
 const exportUsage = "usage: kuroko export [--last | <logfile>] [--command N] [-o <file>]\nWithout --command, exports the entire session. Without -o, writes to stdout.\n"
 
 func resolveLogArgument(args []string, logDir string) (string, error) {
-	return logstore.ResolveViewFile(args, func() (string, error) {
-		cfg, err := config.Resolve(config.Options{LogDir: logDir})
-		if err != nil {
-			return "", err
-		}
-		return cfg.LogDir, nil
-	})
+	return logstore.ResolveViewFile(args, func() (string, error) { return resolveLogDir(logDir) })
+}
+
+// resolveLogDir returns the effective log directory (flag > env > config
+// file > default) without creating it.
+func resolveLogDir(logDir string) (string, error) {
+	cfg, err := config.Resolve(config.Options{LogDir: logDir})
+	if err != nil {
+		return "", err
+	}
+	return cfg.LogDir, nil
 }
 
 func runExport(args []string, logDir string, stdout, stderr io.Writer) error {

@@ -33,13 +33,22 @@ func TestCandidates(t *testing.T) {
 		{
 			name: "empty context lists subcommands and global flags",
 			ctx:  nil,
-			want: []string{"logs", "view", "export", "migrate", "grep", "help", "completion",
+			want: []string{"logs", "view", "export", "migrate", "grep", "help", "config", "completion",
 				"--log-dir", "-d", "--help", "-h", "--version", "-v"},
 		},
 		{
 			name: "view lists log files from configured log dir",
 			ctx:  []string{"view"},
 			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log", "--last", "--follow", "-f"},
+		},
+		{
+			name: "config offers check",
+			ctx:  []string{"config"},
+			want: []string{"check"},
+		},
+		{
+			name: "config check takes no arguments",
+			ctx:  []string{"config", "check"},
 		},
 		{
 			name: "logs offers storage info",

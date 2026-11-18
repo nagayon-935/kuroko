@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -20,22 +21,24 @@ import (
 // Notifier sends session events to external services.
 type Notifier interface {
 	// NotifyStart is called immediately when a session begins.
-	NotifyStart(command string) error
+	NotifyStart(args []string) error
 	// NotifyEnd is called after the session exits, with the completed log file.
-	NotifyEnd(logPath, command string, exitCode int, duration time.Duration) error
+	NotifyEnd(logPath string, args []string, exitCode int, duration time.Duration) error
 }
 
 type Config struct {
-	Type       string
-	WebhookURL string
+	Type        string
+	WebhookURL  string
+	IncludeLog  bool
+	IncludeArgs bool
 }
 
 func New(cfg Config) Notifier {
 	switch cfg.Type {
 	case "discord":
-		return &discordNotifier{webhookURL: cfg.WebhookURL}
+		return &discordNotifier{cfg}
 	case "slack":
-		return &slackNotifier{webhookURL: cfg.WebhookURL}
+		return &slackNotifier{cfg}
 	default:
 		return &noopNotifier{}
 	}
@@ -45,34 +48,29 @@ func New(cfg Config) Notifier {
 
 type noopNotifier struct{}
 
-func (n *noopNotifier) NotifyStart(string) error                           { return nil }
-func (n *noopNotifier) NotifyEnd(string, string, int, time.Duration) error { return nil }
+func (n *noopNotifier) NotifyStart([]string) error                           { return nil }
+func (n *noopNotifier) NotifyEnd(string, []string, int, time.Duration) error { return nil }
 
 // --- Discord ---
 
-type discordNotifier struct{ webhookURL string }
+type discordNotifier struct{ Config }
 
-func (d *discordNotifier) NotifyStart(command string) error {
+func (d *discordNotifier) NotifyStart(args []string) error {
 	embed := map[string]any{
 		"title":       "kuroko — session started",
 		"color":       0x3498db, // blue
 		"description": "🔌 Connected",
 		"fields": []any{
-			map[string]any{"name": "Command", "value": fmt.Sprintf("`%s`", redactCommand(command)), "inline": false},
+			map[string]any{"name": "Command", "value": fmt.Sprintf("`%s`", d.command(args)), "inline": false},
 		},
 		"timestamp": time.Now().UTC().Format(time.RFC3339),
 	}
 	return d.postEmbed(embed)
 }
 
-func (d *discordNotifier) NotifyEnd(logPath, command string, exitCode int, duration time.Duration) error {
-	logContent, err := readLogForSending(logPath, maxAttachmentBytes)
-	if err != nil {
-		return err
-	}
-
+func (d *discordNotifier) NotifyEnd(logPath string, args []string, exitCode int, duration time.Duration) error {
 	color := 0x2ecc71 // green = success
-	status := "✅ Success"
+	status := "✅ Success (exit 0)"
 	if exitCode != 0 {
 		color = 0xe74c3c // red = failure
 		status = fmt.Sprintf("❌ Failed (exit %d)", exitCode)
@@ -83,11 +81,19 @@ func (d *discordNotifier) NotifyEnd(logPath, command string, exitCode int, durat
 		"color":       color,
 		"description": status,
 		"fields": []any{
-			map[string]any{"name": "Command", "value": fmt.Sprintf("`%s`", redactCommand(command)), "inline": true},
+			map[string]any{"name": "Command", "value": fmt.Sprintf("`%s`", d.command(args)), "inline": true},
 			map[string]any{"name": "Duration", "value": formatDuration(duration), "inline": true},
 			map[string]any{"name": "Log file", "value": filepath.Base(logPath), "inline": false},
 		},
 		"timestamp": time.Now().UTC().Format(time.RFC3339),
+	}
+
+	if !d.IncludeLog {
+		return d.postEmbed(embed)
+	}
+	logContent, err := readLogForSending(logPath, maxAttachmentBytes)
+	if err != nil {
+		return err
 	}
 
 	payloadJSON, err := json.Marshal(map[string]any{"embeds": []any{embed}})
@@ -112,7 +118,7 @@ func (d *discordNotifier) NotifyEnd(logPath, command string, exitCode int, durat
 	if err != nil {
 		return fmt.Errorf("creating file field: %w", err)
 	}
-	if _, err := fw.Write([]byte(logContent)); err != nil {
+	if _, err := io.WriteString(fw, logContent); err != nil {
 		return fmt.Errorf("writing file field: %w", err)
 	}
 
@@ -120,7 +126,7 @@ func (d *discordNotifier) NotifyEnd(logPath, command string, exitCode int, durat
 		return fmt.Errorf("closing multipart writer: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, d.webhookURL, &buf)
+	req, err := http.NewRequest(http.MethodPost, d.WebhookURL, &buf)
 	if err != nil {
 		return withoutURL(err)
 	}
@@ -129,43 +135,36 @@ func (d *discordNotifier) NotifyEnd(logPath, command string, exitCode int, durat
 }
 
 func (d *discordNotifier) postEmbed(embed map[string]any) error {
-	body, err := json.Marshal(map[string]any{"embeds": []any{embed}})
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequest(http.MethodPost, d.webhookURL, bytes.NewReader(body))
-	if err != nil {
-		return withoutURL(err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	return doRequest(req)
+	return postJSON(d.WebhookURL, map[string]any{"embeds": []any{embed}})
 }
 
 // --- Slack ---
 
-type slackNotifier struct{ webhookURL string }
+type slackNotifier struct{ Config }
 
-func (s *slackNotifier) NotifyStart(command string) error {
-	return postJSON(s.webhookURL, map[string]string{
-		"text": fmt.Sprintf("🔌 *kuroko* session started: `%s`", redactCommand(command)),
+func (s *slackNotifier) NotifyStart(args []string) error {
+	return postJSON(s.WebhookURL, map[string]string{
+		"text": fmt.Sprintf("🔌 *kuroko* session started: `%s`", s.command(args)),
 	})
 }
 
-func (s *slackNotifier) NotifyEnd(logPath, command string, exitCode int, duration time.Duration) error {
-	logContent, err := readLogForSending(logPath, slackExcerptBytes)
-	if err != nil {
-		return err
-	}
+func (s *slackNotifier) NotifyEnd(logPath string, args []string, exitCode int, duration time.Duration) error {
 	icon := "✅"
 	if exitCode != 0 {
 		icon = "❌"
 	}
-	// A ``` inside the log would close the code block early; a zero-width
-	// space keeps it literal.
-	excerpt := strings.ReplaceAll(logContent, "```", "``\u200b`")
-	text := fmt.Sprintf("%s *kuroko* `%s` ended (exit %d, %s)\n```%s```",
-		icon, redactCommand(command), exitCode, formatDuration(duration), excerpt)
-	return postJSON(s.webhookURL, map[string]string{"text": text})
+	text := fmt.Sprintf("%s *kuroko* `%s` ended (exit %d, %s) — %s",
+		icon, s.command(args), exitCode, formatDuration(duration), filepath.Base(logPath))
+	if s.IncludeLog {
+		logContent, err := readLogForSending(logPath, slackExcerptBytes)
+		if err != nil {
+			return err
+		}
+		// Keep literal backticks in the log from closing the code block early.
+		excerpt := strings.ReplaceAll(logContent, "```", "``\u200b`")
+		text += "\n```" + excerpt + "```"
+	}
+	return postJSON(s.WebhookURL, map[string]string{"text": text})
 }
 
 // --- helpers ---
@@ -219,6 +218,16 @@ func (t *tailBuffer) bytes() []byte {
 		return t.data[len(t.data)-t.max:]
 	}
 	return t.data
+}
+
+func (cfg Config) command(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	if cfg.IncludeArgs {
+		return redactCommand(strings.Join(args, " "))
+	}
+	return redactCommand(filepath.Base(args[0]))
 }
 
 // redactCommand masks credentials in a command line before it is sent.

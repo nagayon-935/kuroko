@@ -7,7 +7,6 @@ import (
 	"io"
 	"regexp"
 
-	"github.com/nagayon-935/kuroko/internal/config"
 	"github.com/nagayon-935/kuroko/internal/logsearch"
 )
 
@@ -49,11 +48,11 @@ func runGrep(args []string, logDir string, stdout, stderr io.Writer) (int, error
 	if err != nil {
 		return grepErrorExit, fmt.Errorf("invalid pattern: %w", err)
 	}
-	cfg, err := config.Resolve(config.Options{LogDir: logDir})
+	dir, err := resolveLogDir(logDir)
 	if err != nil {
 		return grepErrorExit, err
 	}
-	res, err := logsearch.Search(cfg.LogDir, re, logsearch.Options{FilesOnly: filesOnly}, stdout, stderr)
+	res, err := logsearch.Search(dir, re, logsearch.Options{FilesOnly: filesOnly}, stdout, stderr)
 	switch {
 	case err != nil:
 		return grepErrorExit, err

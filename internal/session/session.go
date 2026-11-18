@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -51,8 +50,10 @@ func New(cfg *config.Config, args []string) (*Session, error) {
 	}
 
 	n := notifier.New(notifier.Config{
-		Type:       cfg.Notifier.Type,
-		WebhookURL: cfg.Notifier.WebhookURL,
+		Type:        cfg.Notifier.Type,
+		WebhookURL:  cfg.Notifier.WebhookURL,
+		IncludeArgs: cfg.Notifier.IncludeArgs,
+		IncludeLog:  cfg.Notifier.IncludeLog,
 	})
 
 	return &Session{
@@ -68,15 +69,13 @@ func (s *Session) Run() (int, error) {
 
 	console.Infof("logging → %s", s.log.Path)
 
-	command := strings.Join(s.args, " ")
-
 	// The start notification is sent in the background: a slow or unreachable
 	// webhook (an isolated lab network) must not hold up the connection.
 	// finishLog collects the result, so the request is never cut short by the
 	// process exiting and its warning never lands in the middle of the
 	// session's output.
 	s.startNotified = make(chan error, 1)
-	go func(done chan<- error) { done <- s.notifier.NotifyStart(command) }(s.startNotified)
+	go func(done chan<- error) { done <- s.notifier.NotifyStart(s.args) }(s.startNotified)
 
 	s.start = time.Now()
 	exitCode, err := s.runWithPTY()
@@ -125,7 +124,7 @@ func (s *Session) finishLog(exitCode int) {
 		}
 	}
 
-	if nerr := s.notifier.NotifyEnd(logPath, strings.Join(s.args, " "), exitCode, duration); nerr != nil {
+	if nerr := s.notifier.NotifyEnd(logPath, s.args, exitCode, duration); nerr != nil {
 		console.Warnf("notify error: %v", nerr)
 	}
 

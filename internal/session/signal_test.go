@@ -170,12 +170,12 @@ type spyNotifier struct {
 	lastCommand string
 }
 
-func (s *spyNotifier) NotifyStart(string) error { return nil }
+func (s *spyNotifier) NotifyStart([]string) error { return nil }
 
-func (s *spyNotifier) NotifyEnd(logPath, command string, exitCode int, duration time.Duration) error {
+func (s *spyNotifier) NotifyEnd(logPath string, args []string, exitCode int, duration time.Duration) error {
 	s.endCalls++
 	s.lastCode = exitCode
-	s.lastCommand = command
+	s.lastCommand = strings.Join(args, " ")
 	return nil
 }
 

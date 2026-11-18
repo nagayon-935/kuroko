@@ -26,12 +26,12 @@ func TargetDetails(args []string) (address, hostname string) {
 	raw := TargetAddress(args)
 	switch filepath.Base(args[0]) {
 	case "ssh":
-		resolved := resolveSSHHostname(raw) // may resolve SSH config alias
-		// hostname is the bare host part of the resolved target
-		h := resolved
-		if idx := strings.LastIndex(h, "@"); idx >= 0 {
-			h = h[idx+1:]
+		resolved := raw
+		if opts, ok := extractSSHResolveOptions(args[1:]); ok {
+			resolved = resolveSSHHostname(raw, opts)
 		}
+		// hostname is the bare host part of the resolved target
+		_, h := splitUserHost(resolved)
 		return raw, h
 	default:
 		return raw, raw
@@ -64,10 +64,7 @@ func generateFilename(args []string) string {
 	// Use the typed host (address without user@) as the filename component so
 	// SSH aliases like "edgeSW03" are preserved instead of being replaced by
 	// the resolved IP from ssh -G.
-	host := TargetAddress(args)
-	if idx := strings.LastIndex(host, "@"); idx >= 0 {
-		host = host[idx+1:]
-	}
+	_, host := splitUserHost(TargetAddress(args))
 
 	if host != "" && host != cmd {
 		return fmt.Sprintf("%s_%s_%s.log", ts, sanitize(cmd), sanitize(host))
@@ -75,28 +72,36 @@ func generateFilename(args []string) string {
 	return fmt.Sprintf("%s_%s.log", ts, sanitize(cmd))
 }
 
+// splitUserHost splits "user@host" into "user@" (with the separator, so
+// user+host reassembles the target) and "host". A target without "@" has an
+// empty user part.
+func splitUserHost(target string) (user, host string) {
+	if idx := strings.LastIndex(target, "@"); idx >= 0 {
+		return target[:idx+1], target[idx+1:]
+	}
+	return "", target
+}
+
 const sshResolveTimeout = 2 * time.Second
 
-// resolveSSHHostname runs "ssh -G -- <host>" to resolve an alias defined in
-// ~/.ssh/config to its actual HostName. Returns the original target if
+// resolveSSHHostname runs "ssh -G <opts> -- <host>" to resolve an alias
+// using the supplied connection options. Returns the original target if
 // resolution fails or if the hostname is already the canonical name.
-func resolveSSHHostname(target string) string {
+func resolveSSHHostname(target string, opts []string) string {
 	if target == "" || !sshconfig.ValidHost(target) {
 		return target
 	}
 
-	user, host := "", target
-	if idx := strings.LastIndex(target, "@"); idx >= 0 {
-		user = target[:idx+1]
-		host = target[idx+1:]
-	}
+	user, host := splitUserHost(target)
 	if !sshconfig.ValidHost(host) {
 		return target
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), sshResolveTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "ssh", "-G", "--", host).Output()
+	args := append([]string{"-G"}, opts...)
+	args = append(args, "--", host)
+	out, err := exec.CommandContext(ctx, "ssh", args...).Output()
 	if err != nil {
 		return target
 	}
@@ -111,6 +116,48 @@ func resolveSSHHostname(target string) string {
 		}
 	}
 	return target
+}
+
+// extractSSHResolveOptions collects connection options before the destination.
+func extractSSHResolveOptions(args []string) ([]string, bool) {
+	var opts []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" || arg == "-" || !strings.HasPrefix(arg, "-") {
+			break
+		}
+		cluster := arg[1:]
+		index := sshconfig.ValueOptionIndex(cluster)
+		flags := cluster
+		if index >= 0 {
+			flags = cluster[:index]
+		}
+		for _, flag := range flags {
+			if flag == '4' || flag == '6' {
+				opts = append(opts, "-"+string(flag))
+			}
+		}
+		if index < 0 {
+			continue
+		}
+
+		option := cluster[index : index+1]
+		value := cluster[index+1:]
+		if value == "" {
+			i++
+			if i == len(args) {
+				return nil, false
+			}
+			value = args[i]
+		}
+		if len(value) > 4096 || strings.IndexByte(value, 0) >= 0 {
+			return nil, false
+		}
+		if strings.Contains("FolpJ", option) {
+			opts = append(opts, "-"+option, value)
+		}
+	}
+	return opts, true
 }
 
 // extractSSHTarget returns the first non-flag argument (user@host or host).

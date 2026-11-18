@@ -36,10 +36,10 @@ func TestNew(t *testing.T) {
 
 func TestNoopNotifier(t *testing.T) {
 	n := New(Config{})
-	if err := n.NotifyStart("cmd"); err != nil {
+	if err := n.NotifyStart([]string{"cmd"}); err != nil {
 		t.Errorf("NotifyStart() = %v; want nil", err)
 	}
-	if err := n.NotifyEnd("/path", "cmd", 0, time.Second); err != nil {
+	if err := n.NotifyEnd("/path", []string{"cmd"}, 0, time.Second); err != nil {
 		t.Errorf("NotifyEnd() = %v; want nil", err)
 	}
 }
@@ -132,8 +132,8 @@ func TestDiscordNotifyStart(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d := &discordNotifier{webhookURL: srv.URL}
-	if err := d.NotifyStart("ssh host"); err != nil {
+	d := New(Config{Type: "discord", WebhookURL: srv.URL, IncludeArgs: true, IncludeLog: true})
+	if err := d.NotifyStart([]string{"ssh", "host"}); err != nil {
 		t.Fatalf("NotifyStart() = %v; want nil", err)
 	}
 	if !strings.Contains(string(capturedBody), "session started") {
@@ -153,20 +153,20 @@ func TestDiscordNotifyEnd(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d := &discordNotifier{webhookURL: srv.URL}
+	d := New(Config{Type: "discord", WebhookURL: srv.URL, IncludeArgs: true, IncludeLog: true})
 	// success exit
-	if err := d.NotifyEnd(logPath, "ssh host", 0, 30*time.Second); err != nil {
+	if err := d.NotifyEnd(logPath, []string{"ssh", "host"}, 0, 30*time.Second); err != nil {
 		t.Fatalf("NotifyEnd(exit=0) = %v; want nil", err)
 	}
 	// non-zero exit (different color/status path)
-	if err := d.NotifyEnd(logPath, "ssh host", 1, time.Minute); err != nil {
+	if err := d.NotifyEnd(logPath, []string{"ssh", "host"}, 1, time.Minute); err != nil {
 		t.Fatalf("NotifyEnd(exit=1) = %v; want nil", err)
 	}
 }
 
 func TestDiscordNotifyEndFileError(t *testing.T) {
-	d := &discordNotifier{webhookURL: "http://example.com"}
-	err := d.NotifyEnd("/nonexistent/path/file.log", "cmd", 0, time.Second)
+	d := New(Config{Type: "discord", WebhookURL: "http://example.com", IncludeArgs: true, IncludeLog: true})
+	err := d.NotifyEnd("/nonexistent/path/file.log", []string{"cmd"}, 0, time.Second)
 	if err == nil {
 		t.Error("expected error for missing log file, got nil")
 	}
@@ -180,8 +180,8 @@ func TestSlackNotifyStart(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	s := &slackNotifier{webhookURL: srv.URL}
-	if err := s.NotifyStart("ssh host"); err != nil {
+	s := New(Config{Type: "slack", WebhookURL: srv.URL, IncludeArgs: true, IncludeLog: true})
+	if err := s.NotifyStart([]string{"ssh", "host"}); err != nil {
 		t.Fatalf("NotifyStart() = %v; want nil", err)
 	}
 	if !strings.Contains(string(capturedBody), "session started") {
@@ -201,18 +201,18 @@ func TestSlackNotifyEnd(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	s := &slackNotifier{webhookURL: srv.URL}
-	if err := s.NotifyEnd(logPath, "ssh host", 0, 10*time.Second); err != nil {
+	s := New(Config{Type: "slack", WebhookURL: srv.URL, IncludeArgs: true, IncludeLog: true})
+	if err := s.NotifyEnd(logPath, []string{"ssh", "host"}, 0, 10*time.Second); err != nil {
 		t.Fatalf("NotifyEnd(exit=0) = %v; want nil", err)
 	}
-	if err := s.NotifyEnd(logPath, "cmd", 1, time.Minute); err != nil {
+	if err := s.NotifyEnd(logPath, []string{"cmd"}, 1, time.Minute); err != nil {
 		t.Fatalf("NotifyEnd(exit=1) = %v; want nil", err)
 	}
 }
 
 func TestSlackNotifyEndFileError(t *testing.T) {
-	s := &slackNotifier{webhookURL: "http://example.com"}
-	err := s.NotifyEnd("/nonexistent/path/file.log", "cmd", 0, time.Second)
+	s := New(Config{Type: "slack", WebhookURL: "http://example.com", IncludeArgs: true, IncludeLog: true})
+	err := s.NotifyEnd("/nonexistent/path/file.log", []string{"cmd"}, 0, time.Second)
 	if err == nil {
 		t.Error("expected error for missing log file, got nil")
 	}
@@ -262,8 +262,8 @@ func TestDiscordNotifyEndSendsRedactedTextOfCompressedLog(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d := &discordNotifier{webhookURL: srv.URL}
-	if err := d.NotifyEnd(logPath, "env AWS_ACCESS_KEY_ID=AKIAABCDEFGHIJKLMNOP ssh host", 0, time.Second); err != nil {
+	d := New(Config{Type: "discord", WebhookURL: srv.URL, IncludeArgs: true, IncludeLog: true})
+	if err := d.NotifyEnd(logPath, []string{"env", "AWS_ACCESS_KEY_ID=AKIAABCDEFGHIJKLMNOP", "ssh", "host"}, 0, time.Second); err != nil {
 		t.Fatalf("NotifyEnd() = %v", err)
 	}
 	if filename != "session.log" {
@@ -288,8 +288,8 @@ func TestSlackNotifyEndSendsRedactedTextOfCompressedLog(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	s := &slackNotifier{webhookURL: srv.URL}
-	if err := s.NotifyEnd(logPath, "env AWS_ACCESS_KEY_ID=AKIAABCDEFGHIJKLMNOP ssh host", 0, time.Second); err != nil {
+	s := New(Config{Type: "slack", WebhookURL: srv.URL, IncludeArgs: true, IncludeLog: true})
+	if err := s.NotifyEnd(logPath, []string{"env", "AWS_ACCESS_KEY_ID=AKIAABCDEFGHIJKLMNOP", "ssh", "host"}, 0, time.Second); err != nil {
 		t.Fatalf("NotifyEnd() = %v", err)
 	}
 	if !strings.Contains(payload.Text, "# kuroko session log") {
@@ -311,12 +311,95 @@ func TestNotifyStartRedactsCommand(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	for _, n := range []Notifier{&discordNotifier{webhookURL: srv.URL}, &slackNotifier{webhookURL: srv.URL}} {
-		if err := n.NotifyStart("curl -H 'Authorization: Bearer s3cr3t-token' https://api"); err != nil {
+	for _, n := range []Notifier{New(Config{Type: "discord", WebhookURL: srv.URL, IncludeArgs: true, IncludeLog: true}), New(Config{Type: "slack", WebhookURL: srv.URL, IncludeArgs: true, IncludeLog: true})} {
+		if err := n.NotifyStart([]string{"curl", "-H", "Authorization: Bearer s3cr3t-token", "https://api"}); err != nil {
 			t.Fatal(err)
 		}
 		if strings.Contains(string(body), "s3cr3t-token") {
 			t.Errorf("%T sent the token: %s", n, body)
+		}
+	}
+}
+
+func TestNotificationOptions(t *testing.T) {
+	const secret = "AKIAABCDEFGHIJKLMNOP"
+	const masked = "[AWS_ACCESS_KEY_REDACTED]"
+	args := []string{"/opt/my tools/ssh", "arg-marker", secret}
+	for _, kind := range []string{"discord", "slack"} {
+		for _, tt := range []struct {
+			name      string
+			args, log bool
+		}{
+			{"default", false, false},
+			{"args only", true, false},
+			{"log only", false, true},
+			{"both", true, true},
+		} {
+			t.Run(kind+"/"+tt.name, func(t *testing.T) {
+				// A missing log in metadata-only mode also detects an attempted read.
+				path := filepath.Join(t.TempDir(), "session.log")
+				if tt.log {
+					if err := os.WriteFile(path, []byte("log-marker "+secret), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				type request struct{ contentType, body string }
+				requests := make(chan request, 2)
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					b, err := io.ReadAll(r.Body)
+					if err != nil {
+						t.Error(err)
+					}
+					requests <- request{r.Header.Get("Content-Type"), string(b)}
+				}))
+				defer srv.Close()
+				n := New(Config{Type: kind, WebhookURL: srv.URL, IncludeArgs: tt.args, IncludeLog: tt.log})
+
+				if err := n.NotifyStart(args); err != nil {
+					t.Fatal(err)
+				}
+				if err := n.NotifyEnd(path, args, 7, 13*time.Second); err != nil {
+					t.Fatal(err)
+				}
+
+				start, end := <-requests, <-requests
+				wantCommand := "`ssh`"
+				if tt.args {
+					wantCommand = "`/opt/my tools/ssh arg-marker " + masked + "`"
+				}
+				for _, r := range []request{start, end} {
+					if !strings.Contains(r.body, wantCommand) || strings.Contains(r.body, secret) || strings.Contains(r.body, filepath.Dir(path)) {
+						t.Errorf("unexpected command, secret or path in payload: %s", r.body)
+					}
+					if !tt.args && (strings.Contains(r.body, "arg-marker") || strings.Contains(r.body, "/opt/")) {
+						t.Errorf("unexpected command arguments or directory: %s", r.body)
+					}
+				}
+				if start.contentType != "application/json" || strings.Contains(start.body, "log-marker") {
+					t.Errorf("unexpected start request: %+v", start)
+				}
+				for _, field := range []string{"exit 7", "13s", "session.log"} {
+					if !strings.Contains(end.body, field) {
+						t.Errorf("end payload missing %q: %s", field, end.body)
+					}
+				}
+				wantType := "application/json"
+				if kind == "discord" && tt.log {
+					wantType = "multipart/form-data;"
+				}
+				if !strings.HasPrefix(end.contentType, wantType) {
+					t.Errorf("end Content-Type = %q; want %q", end.contentType, wantType)
+				}
+				if strings.Contains(end.body, "log-marker "+masked) != tt.log || strings.Contains(end.body, "log-marker") != tt.log {
+					t.Errorf("unexpected log content: %s", end.body)
+				}
+				if strings.Contains(end.body, "```") != (kind == "slack" && tt.log) {
+					t.Errorf("unexpected code block: %s", end.body)
+				}
+				if strings.Contains(end.body, `name="files[0]"; filename="session.log"`) != (kind == "discord" && tt.log) {
+					t.Errorf("unexpected attachment: %s", end.body)
+				}
+			})
 		}
 	}
 }

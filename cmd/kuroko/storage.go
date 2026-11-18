@@ -55,11 +55,11 @@ func runMigration(args []string, stdout, stderr io.Writer) error {
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return err
+		return fmt.Errorf("locating home directory: %w", err)
 	}
 	r, err := migration.Run(home, *from)
 	if err != nil {
-		return err
+		return fmt.Errorf("migrating logs: %w", err)
 	}
 	fmt.Fprintf(stdout, "Migration verified: %d logs, %d files, %d bytes\nStorage: %s\n", r.Logs, r.Files, r.Bytes, r.Destination)
 	if r.ConfigMigrated {
