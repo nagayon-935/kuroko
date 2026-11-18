@@ -708,81 +708,75 @@ func TestCompressFile(t *testing.T) {
 }
 
 func TestRotateLogs(t *testing.T) {
-	tmp := t.TempDir()
-
-	// Create 3 log files with different modification times and sizes
-	// log1: 10 days old, 100 bytes
-	// log2: 5 days old, 200 bytes
-	// log3: 1 day old, 300 bytes
-	files := []struct {
-		name    string
-		ageDays int
-		size    int
+	const header = "# kuroko session log\n# Started : 2020-01-01T00:00:00Z\n# Command : ssh router\n# Target  : router\n# ----\n\n"
+	footer := "\n# " + strings.Repeat("-", 68) + "\n# Ended   : 2020-01-01T00:01:00Z\n# Exit    : 0\n"
+	session := header + "output" + footer
+	const comment = "kuroko-summary ended=2020-01-01T00:01:00Z exit=0"
+	type file struct {
+		name, content, comment string
+		ageDays                int
+		removed                bool
+	}
+	large := strings.Repeat("x", 3<<19)
+	for _, tt := range []struct {
+		name            string
+		maxAge, maxSize int
+		files           []file
 	}{
-		{"log1.log", 10, 100},
-		{"log2.log", 5, 200},
-		{"log3.log.gz", 1, 300},
-	}
+		{"age in a shared directory", 7, 0, []file{
+			{"20200101_000000_ssh_router.log", session, "", 10, true},
+			{"app.log", "foreign", "", 10, false},
+			{"20200101_000000_other.log", "foreign" + footer, "", 10, false},
+			{"20200101_000000_bad name.log", session, "", 10, false},
+			{"20200101_000001_ssh_router.log", session, "", 5, false},
+			{"20200101_000002_ssh_ルータ_1.log.gz", session, comment, 10, true},
+			{"20200101_000003_shell.log.gz", session, "", 10, false},
+			{"app.log.gz", "foreign", comment, 10, false},
+		}},
+		{"foreign files excluded from size", 0, 1, []file{
+			{"app.log", large, "", 1, false},
+			{"20200101_000000_other.log", large, "", 10, false},
+			{"20200101_000001_shell.log", session, "", 5, false},
+		}},
+		{"size removes oldest sessions first", 0, 1, []file{
+			{"20200101_000000_other.log", large, "", 10, false},
+			{"20200101_000001_shell.log", session, "", 5, true},
+			{"20200101_000002_shell.log", header + large + footer, "", 2, true},
+			{"20200101_000003_shell.log.gz", session, comment, 1, false},
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, f := range tt.files {
+				path := filepath.Join(dir, f.name)
+				data := []byte(f.content)
+				if strings.HasSuffix(f.name, ".gz") {
+					var archive bytes.Buffer
+					if err := compressStreamWithComment(&archive, strings.NewReader(f.content), f.comment); err != nil {
+						t.Fatal(err)
+					}
+					data = archive.Bytes()
+				}
+				if err := os.WriteFile(path, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				mtime := time.Now().Add(-time.Duration(f.ageDays) * 24 * time.Hour)
+				if err := os.Chtimes(path, mtime, mtime); err != nil {
+					t.Fatal(err)
+				}
+			}
 
-	now := time.Now()
-	for _, f := range files {
-		path := filepath.Join(tmp, f.name)
-		content := make([]byte, f.size)
-		if err := os.WriteFile(path, content, 0o600); err != nil {
-			t.Fatalf("WriteFile error: %v", err)
-		}
-		// Change modtime
-		mTime := now.Add(-time.Duration(f.ageDays) * 24 * time.Hour)
-		if err := os.Chtimes(path, mTime, mTime); err != nil {
-			t.Fatalf("Chtimes error: %v", err)
-		}
-	}
+			if err := RotateLogs(dir, tt.maxAge, tt.maxSize); err != nil {
+				t.Fatal(err)
+			}
 
-	// Test case 1: Rotate by age (maxAgeDays = 7)
-	// log1 (10 days) should be deleted, log2 and log3 should remain.
-	if err := RotateLogs(tmp, 7, 0); err != nil {
-		t.Fatalf("RotateLogs by age error: %v", err)
-	}
-
-	if _, err := os.Stat(filepath.Join(tmp, "log1.log")); !os.IsNotExist(err) {
-		t.Error("log1.log (10 days old) should have been deleted")
-	}
-	if _, err := os.Stat(filepath.Join(tmp, "log2.log")); err != nil {
-		t.Error("log2.log (5 days old) should not have been deleted")
-	}
-	if _, err := os.Stat(filepath.Join(tmp, "log3.log.gz")); err != nil {
-		t.Error("log3.log.gz (1 day old) should not have been deleted")
-	}
-
-	// Test case 2: Rotate by size (maxTotalSizeMB = 1 (1MB), but we create a 1.5MB file to trigger it)
-	largeContent := make([]byte, 1024*1024*3/2) // 1.5MB
-	largePath := filepath.Join(tmp, "log4.log")
-	if err := os.WriteFile(largePath, largeContent, 0o600); err != nil {
-		t.Fatalf("WriteFile error: %v", err)
-	}
-	mTime := now.Add(-2 * 24 * time.Hour)
-	if err := os.Chtimes(largePath, mTime, mTime); err != nil {
-		t.Fatalf("Chtimes error: %v", err)
-	}
-
-	// Currently in folder:
-	// log2.log (5 days old, 200 bytes)
-	// log4.log (2 days old, 1.5MB)
-	// log3.log.gz (1 day old, 300 bytes)
-	// Total size is > 1.5MB, limit is 1MB.
-	// log2 (oldest) and log4 (second oldest) should be deleted.
-	if err := RotateLogs(tmp, 0, 1); err != nil {
-		t.Fatalf("RotateLogs by size error: %v", err)
-	}
-
-	if _, err := os.Stat(filepath.Join(tmp, "log2.log")); !os.IsNotExist(err) {
-		t.Error("log2.log (oldest) should have been deleted")
-	}
-	if _, err := os.Stat(filepath.Join(tmp, "log4.log")); !os.IsNotExist(err) {
-		t.Error("log4.log (second oldest, large) should have been deleted")
-	}
-	if _, err := os.Stat(filepath.Join(tmp, "log3.log.gz")); err != nil {
-		t.Error("log3.log.gz (newest) should not have been deleted")
+			for _, f := range tt.files {
+				_, err := os.Stat(filepath.Join(dir, f.name))
+				if f.removed && !os.IsNotExist(err) || !f.removed && err != nil {
+					t.Errorf("%s: want removed=%v, stat error=%v", f.name, f.removed, err)
+				}
+			}
+		})
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"syscall"
@@ -119,8 +120,14 @@ func compressStreamWithComment(dst io.Writer, src io.Reader, comment string) err
 // older kuroko that did not lock its log.
 const abandonedLogAge = 24 * time.Hour
 
+// Match generateFilename's sanitized command and optional target, including
+// the numeric suffix createLogFile adds on collisions.
+const filenamePart = `[^/\\: *?"<>|\p{Cc}\p{Cf}]{1,96}`
+
+var sessionLogName = regexp.MustCompile(`^[0-9]{8}_[0-9]{6}_` + filenamePart + `(_` + filenamePart + `)?(_[1-9][0-9]*)?\.log(\.gz)?$`)
+
 // RotateLogs scans the logDir and removes old logs based on age and total
-// directory size. Logs of sessions that are still running are never removed;
+// session log size. Logs of sessions that are still running are never removed;
 // they still count towards the total size.
 //
 // Only logs that are about to be removed are opened: rotation runs at the end
@@ -142,20 +149,21 @@ func RotateLogs(logDir string, maxAgeDays int, maxTotalSizeMB int) error {
 	now := time.Now()
 	maxAge := time.Duration(maxAgeDays) * 24 * time.Hour
 
-	// remove deletes path unless its session is still running, and reports
-	// whether the file is gone.
-	remove := func(path string, modTime time.Time) bool {
-		if activeLog(path, now.Sub(modTime)) {
-			return false
+	// Name matches count provisionally. When a file comes up for removal,
+	// drop its size if it is unidentifiable or gone. Identified active logs
+	// and logs whose removal failed still count against the budget.
+	exclude := func(path string, modTime time.Time) bool {
+		drop, err := removeRotationCandidate(path, now.Sub(modTime))
+		if err != nil {
+			rotationErr = errors.Join(rotationErr, err)
 		}
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			rotationErr = errors.Join(rotationErr, fmt.Errorf("remove %s: %w", path, err))
-			return false
-		}
-		return true
+		return drop
 	}
 
 	for _, entry := range entries {
+		if !sessionLogName.MatchString(filepath.Base(entry.Path)) {
+			continue
+		}
 		info, err := entry.Info()
 		if err != nil {
 			if !os.IsNotExist(err) {
@@ -165,7 +173,7 @@ func RotateLogs(logDir string, maxAgeDays int, maxTotalSizeMB int) error {
 		}
 
 		// 1. Remove files older than maxAgeDays
-		if maxAgeDays > 0 && now.Sub(info.ModTime()) > maxAge && remove(entry.Path, info.ModTime()) {
+		if maxAgeDays > 0 && now.Sub(info.ModTime()) > maxAge && exclude(entry.Path, info.ModTime()) {
 			continue
 		}
 		// Files that could not be removed stay in the size accounting.
@@ -195,7 +203,7 @@ func RotateLogs(logDir string, maxAgeDays int, maxTotalSizeMB int) error {
 		if totalSize <= maxTotalSizeBytes {
 			break
 		}
-		if remove(f.path, f.modTime) {
+		if exclude(f.path, f.modTime) {
 			totalSize -= f.size
 		}
 	}
@@ -203,28 +211,23 @@ func RotateLogs(logDir string, maxAgeDays int, maxTotalSizeMB int) error {
 	return rotationErr
 }
 
-// activeLog reports whether the log at path may belong to a session that is
-// still running; idle is how long ago the file was last written.
-//
-// A running session holds an advisory lock on its log. Logs from older kuroko
-// versions have no lock, so a recognized session log without a completion
-// footer is also left alone — but only while it is recent: once it has been
-// idle for abandonedLogAge, its session was killed or crashed, and keeping it
-// forever would put it beyond retention cleanup.
-func activeLog(path string, idle time.Duration) bool {
+// removeRotationCandidate returns whether to drop this file from the size total.
+func removeRotationCandidate(path string, idle time.Duration) (bool, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return true
+		return true, nil
 	}
 	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return true
+	lockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	identified, finished := logstore.RotationMetadata(f)
+	if !identified {
+		return true, nil
 	}
-	// A compressed log was closed before it was compressed, and reading its
-	// footer would mean decompressing all of it.
-	if strings.HasSuffix(path, ".gz") || idle >= abandonedLogAge {
-		return false
+	if lockErr != nil || (!finished && idle < abandonedLogAge) {
+		return false, nil
 	}
-	s, err := logstore.ReadSummary(path)
-	return err != nil || (s.Command != "" && s.ExitCode == nil)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return false, fmt.Errorf("remove %s: %w", path, err)
+	}
+	return true, nil
 }
