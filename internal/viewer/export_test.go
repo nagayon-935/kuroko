@@ -3,6 +3,8 @@ package viewer
 import (
 	"bytes"
 	"compress/gzip"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -115,6 +117,83 @@ func TestExportOldMetadataAndDeviceCommand(t *testing.T) {
 		}
 		if b.String() != "Router#show version\nversion 1\n" {
 			t.Fatal(b.String())
+		}
+	}
+}
+
+func TestExportExactBytes(t *testing.T) {
+	const old = "# kuroko:cmd:2026-10-08T10:00:00+09:00|show version\r\n"
+	const first = "Router#show version\r\nversion 1\r\n"
+	const ls = "user@host:~$ ls\nfile.txt\n\n"
+	const cat = "user@host:~$ cat file.txt\nhello world\n"
+	header, _, _ := strings.Cut(testLogContent, "# kuroko:cmd:")
+	_, footer, _ := strings.Cut(testLogContent, cat)
+	fixture := strings.Replace(testLogContent, header, header+old+first, 1)
+	long := strings.Repeat("x", 1<<20+1) + "\r\n\xffend"
+	for _, tc := range []struct {
+		name, input string
+		command     int
+		want        string
+	}{
+		{"session", fixture, 0, header + first + ls + cat + footer},
+		{"legacy", fixture, 1, first},
+		{"middle", fixture, 2, ls},
+		{"last", fixture, 3, cat},
+		{"long session", old + long, 0, long},
+		{"long command", old + long, 1, long},
+		{"unterminated metadata", "one\r\n# kuroko:cmd:end", 0, "one\r"},
+		{"terminated metadata", "one\r\n# kuroko:cmd:end\n", 0, "one\r\n"},
+	} {
+		for _, name := range []string{"session.log", "session.log.gz"} {
+			t.Run(tc.name+"/"+name, func(t *testing.T) {
+				path := saveViewerLog(t, t.TempDir(), name, tc.input)
+				var got bytes.Buffer
+				if err := Export(path, tc.command, &got); err != nil {
+					t.Fatal(err)
+				}
+				if got.String() != tc.want {
+					t.Fatalf("export differs from expected bytes (got %d, want %d)", got.Len(), len(tc.want))
+				}
+			})
+		}
+	}
+}
+
+func TestExportErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := saveViewerLog(t, dir, "session.log.gz", testLogContent)
+	if err := Export(path, 3, io.Discard); err == nil || err.Error() != "command 3 not found (this log has 2 commands)" {
+		t.Fatalf("unexpected invalid-command error: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(path, info.Size()-1); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []int{0, 1} {
+		if err := Export(path, command, io.Discard); !errors.Is(err, io.ErrUnexpectedEOF) || err == io.ErrUnexpectedEOF {
+			t.Errorf("command %d: expected wrapped gzip read error, got %v", command, err)
+		}
+		if err := Export(filepath.Join(dir, "missing.gz"), command, io.Discard); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("command %d: expected missing-file error, got %v", command, err)
+		}
+	}
+}
+
+func BenchmarkExportFullSession(b *testing.B) {
+	line := append(bytes.Repeat([]byte("x"), 127), '\n')
+	data := bytes.Repeat(line, 1<<17)
+	path := filepath.Join(b.TempDir(), "session.log")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		b.Fatal(err)
+	}
+	b.SetBytes(int64(len(data)))
+	b.ReportAllocs()
+	for b.Loop() {
+		if err := Export(path, 0, io.Discard); err != nil {
+			b.Fatal(err)
 		}
 	}
 }
