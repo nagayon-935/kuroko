@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -34,6 +35,71 @@ func TestExtractSSHTarget(t *testing.T) {
 			got := extractSSHTarget(tt.args)
 			if got != tt.want {
 				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractSSHResolveOptions(t *testing.T) {
+	limit := strings.Repeat("x", 4096)
+	tests := []struct {
+		name       string
+		args, want []string
+		ok         bool
+	}{
+		{"separated", []string{"-F", "work.conf", "-l", "user", "-p", "2222", "-J", "jump", "edge"}, []string{"-F", "work.conf", "-l", "user", "-p", "2222", "-J", "jump"}, true},
+		{"attached and repeated", []string{"-Fwork.conf", "-oHostName=x", "-o", "Port=22", "edge"}, []string{"-F", "work.conf", "-o", "HostName=x", "-o", "Port=22"}, true},
+		{"clusters", []string{"-v4F", "work.conf", "-A6p2222", "edge"}, []string{"-4", "-F", "work.conf", "-6", "-p", "2222"}, true},
+		{"double dash", []string{"-6", "--", "-4"}, []string{"-6"}, true},
+		{"after target", []string{"-4", "edge", "-o", "HostName=x"}, []string{"-4"}, true},
+		{"unrelated", []string{"-v", "-A", "-t", "-i", "-4", "-viF6", "edge"}, nil, true},
+		{"at limit", []string{"-F" + limit, "edge"}, []string{"-F", limit}, true},
+		{"over limit", []string{"-F", limit + "x", "edge"}, nil, false},
+		{"NUL", []string{"-oHostName=x\x00", "edge"}, nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := extractSSHResolveOptions(tt.args)
+
+			if ok != tt.ok || !slices.Equal(got, tt.want) {
+				t.Errorf("got (%q, %t), want (%q, %t)", got, ok, tt.want, tt.ok)
+			}
+		})
+	}
+}
+
+func TestTargetDetailsSSHOptions(t *testing.T) {
+	dir := t.TempDir()
+	const script = `#!/bin/sh
+if [ "$#" -eq 5 ] && [ "$1" = -G ] && [ "$2" = -F ] && [ "$4" = -- ] && [ "$5" = edge ]; then
+	case "$3" in
+		work.conf) echo 'hostname work.example'; exit 0 ;;
+		missing.conf) exit 1 ;;
+	esac
+fi
+echo 'hostname default.example'
+`
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"default config", []string{"ssh", "edge"}, "default.example"},
+		{"work config", []string{"ssh", "-F", "work.conf", "edge"}, "work.example"},
+		{"failed lookup", []string{"ssh", "-F", "missing.conf", "edge"}, "edge"},
+		{"invalid option value", []string{"ssh", "-F", strings.Repeat("x", 4097), "edge"}, "edge"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			address, hostname := TargetDetails(tt.args)
+
+			if address != "edge" || hostname != tt.want {
+				t.Errorf("got (%q, %q), want (%q, %q)", address, hostname, "edge", tt.want)
 			}
 		})
 	}
@@ -144,14 +210,14 @@ func TestGenerateFilename(t *testing.T) {
 func TestResolveSSHHostnameFallback(t *testing.T) {
 	// A host that is NOT an alias should come back as-is.
 	// ssh -G will succeed but return the same hostname.
-	got := resolveSSHHostname("localhost")
+	got := resolveSSHHostname("localhost", nil)
 	if got != "localhost" {
 		t.Errorf("resolveSSHHostname(\"localhost\") = %q, want \"localhost\"", got)
 	}
 }
 
 func TestResolveSSHHostnameEmpty(t *testing.T) {
-	if got := resolveSSHHostname(""); got != "" {
+	if got := resolveSSHHostname("", nil); got != "" {
 		t.Errorf("expected empty, got %q", got)
 	}
 }
