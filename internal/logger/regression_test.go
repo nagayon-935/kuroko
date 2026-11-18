@@ -279,7 +279,7 @@ func TestRotateBySizeTreatsFooterlessLogByIdleTime(t *testing.T) {
 	}
 }
 
-func TestActiveLog(t *testing.T) {
+func TestRemoveRotationCandidate(t *testing.T) {
 	root := t.TempDir()
 	footerless := writeFooterlessLog(t, root, "a.log", 10, 0)
 	closed, err := New(root, []string{"ssh", "closed"}, false)
@@ -305,12 +305,16 @@ func TestActiveLog(t *testing.T) {
 		{"footer-less and recent", footerless, time.Hour, true},
 		{"footer-less and idle past the threshold", footerless, abandonedLogAge, false},
 		{"closed with a footer", closed.Path, time.Hour, false},
-		{"missing file", filepath.Join(root, "missing.log"), time.Hour, true},
+		{"missing file", filepath.Join(root, "missing.log"), time.Hour, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := activeLog(tt.path, tt.idle); got != tt.want {
-				t.Errorf("activeLog() = %v; want %v", got, tt.want)
+			drop, err := removeRotationCandidate(tt.path, tt.idle)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if kept := !drop; kept != tt.want {
+				t.Errorf("kept in size total = %v; want %v", kept, tt.want)
 			}
 		})
 	}

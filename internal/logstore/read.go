@@ -157,6 +157,26 @@ func ReadSummary(path string) (Summary, error) {
 		return Summary{}, err
 	}
 	defer r.Close()
+	return readSummary(r)
+}
+
+// RotationMetadata identifies a session on the open file and reports whether it
+// finished. Unmarked archives are kept without decompressing their contents.
+func RotationMetadata(f *os.File) (identified, finished bool) {
+	if strings.HasSuffix(f.Name(), ".gz") {
+		gr, err := gzip.NewReader(f)
+		if err != nil {
+			return false, false
+		}
+		defer gr.Close()
+		marked := strings.HasPrefix(gr.Comment, summaryCommentPrefix)
+		return marked, marked
+	}
+	s, err := readSummary(f)
+	return err == nil && (s.Command != "" || !s.Started.IsZero()), s.ExitCode != nil
+}
+
+func readSummary(r io.Reader) (Summary, error) {
 	head, err := io.ReadAll(io.LimitReader(r, metadataWindow))
 	if err != nil {
 		return Summary{}, err

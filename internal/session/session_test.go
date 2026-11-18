@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/nagayon-935/kuroko/internal/config"
+	"github.com/nagayon-935/kuroko/internal/logger"
 	"github.com/nagayon-935/kuroko/internal/logstore"
 	"github.com/nagayon-935/kuroko/internal/session"
 )
@@ -160,12 +161,15 @@ func TestSessionRunWithCompressionThreshold(t *testing.T) {
 
 func TestSessionRunWithRotation(t *testing.T) {
 	tmp := t.TempDir()
-	oldPath := filepath.Join(tmp, "old.log")
-	if err := os.WriteFile(oldPath, []byte("old session"), 0o600); err != nil {
+	old, err := logger.New(tmp, []string{"echo", "old"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Close(0); err != nil {
 		t.Fatal(err)
 	}
 	oldTime := time.Now().Add(-31 * 24 * time.Hour)
-	if err := os.Chtimes(oldPath, oldTime, oldTime); err != nil {
+	if err := os.Chtimes(old.Path, oldTime, oldTime); err != nil {
 		t.Fatal(err)
 	}
 	cfg := &config.Config{
@@ -189,7 +193,7 @@ func TestSessionRunWithRotation(t *testing.T) {
 	if code != 0 {
 		t.Errorf("exit code = %d; want 0", code)
 	}
-	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+	if _, err := os.Stat(old.Path); !os.IsNotExist(err) {
 		t.Fatalf("rotation must complete before Run returns; old log stat = %v", err)
 	}
 }
