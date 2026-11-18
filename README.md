@@ -428,7 +428,9 @@ user@junos> show route       → 記録
   "log_dir": "/path/to/your/logs",
   "notifier": {
     "type": "none",
-    "webhook_url": ""
+    "webhook_url": "",
+    "include_log": false,
+    "include_args": false
   },
   "redaction": {
     "enabled": true
@@ -459,6 +461,12 @@ user@junos> show route       → 記録
 --log-dir フラグ  >  $KUROKO_LOG_DIR 環境変数  >  config.json  >  デフォルト
 ```
 
+### 設定の確認
+
+`kuroko config check` は、読み込んだ設定ファイルのパスと、環境変数や `--log-dir` を反映した設定を表示します。ログの保存先、マスキング、通知、ローテーション、圧縮の設定を確認できます。Webhook URL は表示せず、設定の有無だけを示します。
+
+たとえば `redaction.enable` と書くと、正しいキー `enabled` が候補として表示されます。問題がなければ終了コードは 0、警告や読み込みエラーがあれば 1 です。通常の実行では、設定に警告があっても処理を続行します。
+
 ## 環境変数
 
 | 変数名 | 説明 |
@@ -466,10 +474,15 @@ user@junos> show route       → 記録
 | `KUROKO_LOG_DIR` | ログの保存先 |
 | `KUROKO_NOTIFIER` | 通知タイプ: `none` / `discord` / `slack` |
 | `KUROKO_WEBHOOK_URL` | Discord または Slack の Webhook URL |
+| `KUROKO_NOTIFIER_INCLUDE_LOG` | `notifier.include_log` を上書き（`true` / `false`） |
+| `KUROKO_NOTIFIER_INCLUDE_ARGS` | `notifier.include_args` を上書き（`true` / `false`） |
 
 ## 通知機能（Discord / Slack）
 
-セッション終了時にログを自動送信できます。
+以前のバージョンでは終了時に必ずログを送信していました。現在の既定値では、開始時はコマンド名（例: `ssh`）のみ、終了時はコマンド名、終了状態・終了コード、実行時間、ログファイル名のみを通知します。
+
+`notifier.include_args` を `true` にすると、開始・終了の両方で引数を含むコマンドラインを送信します。
+`notifier.include_log` を `true` にすると、終了時に次の形式でログを送信します。どちらも既定値は `false` で、個別に設定できます。
 
 - Discord: ログ全体をテキストファイルとして添付します（8 MiB を超える場合は末尾の 8 MiB）。
 - Slack: ログの末尾 2,500 バイトをメッセージに含めます。

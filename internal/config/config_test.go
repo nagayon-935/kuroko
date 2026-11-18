@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -252,5 +253,59 @@ func TestResolvePrefersNewConfigAndKeepsLegacyReadOnly(t *testing.T) {
 	data, err := os.ReadFile(oldConfig)
 	if err != nil || string(data) != string(oldData) {
 		t.Fatal("legacy config changed during resolve")
+	}
+}
+
+func TestResolveNotifierOptions(t *testing.T) {
+	const logEnv = "KUROKO_NOTIFIER_INCLUDE_LOG"
+	const argsEnv = "KUROKO_NOTIFIER_INCLUDE_ARGS"
+	for _, key := range []string{logEnv, argsEnv} {
+		t.Setenv(key, "") // Restore the original environment after the test.
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tt := range []struct {
+		name, config, env, value string
+		wantLog, wantArgs        bool
+		wantErr                  bool
+	}{
+		{"defaults", "{}", "", "", false, false, false},
+		{"JSON args", `{"include_args":true}`, "", "", false, true, false},
+		{"JSON log", `{"include_log":true}`, "", "", true, false, false},
+		{"override log", `{"include_log":true,"include_args":true}`, logEnv, "0", false, true, false},
+		{"override args", `{"include_log":true,"include_args":false}`, argsEnv, "TRUE", true, true, false},
+		{"invalid log", "{}", logEnv, "sometimes", false, false, true},
+		{"invalid args", "{}", argsEnv, "", false, false, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			paths := PathsForHome(home)
+			if err := os.MkdirAll(paths.Directory, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(paths.ConfigFile, []byte(`{"notifier":`+tt.config+"}"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if tt.env != "" {
+				t.Setenv(tt.env, tt.value)
+			}
+
+			cfg, err := Resolve(Options{})
+
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), tt.env) {
+					t.Errorf("Resolve error = %v; want error naming %s", err, tt.env)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Notifier.IncludeLog != tt.wantLog || cfg.Notifier.IncludeArgs != tt.wantArgs {
+				t.Errorf("got include_log=%t include_args=%t; want %t, %t", cfg.Notifier.IncludeLog, cfg.Notifier.IncludeArgs, tt.wantLog, tt.wantArgs)
+			}
+		})
 	}
 }

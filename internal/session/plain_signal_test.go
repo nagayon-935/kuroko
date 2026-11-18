@@ -114,13 +114,13 @@ type slowStartNotifier struct {
 	ended   bool
 }
 
-func (n *slowStartNotifier) NotifyStart(string) error {
+func (n *slowStartNotifier) NotifyStart([]string) error {
 	close(n.started)
 	<-n.release
 	return n.err
 }
 
-func (n *slowStartNotifier) NotifyEnd(string, string, int, time.Duration) error {
+func (n *slowStartNotifier) NotifyEnd(string, []string, int, time.Duration) error {
 	n.ended = true
 	return nil
 }

@@ -28,9 +28,9 @@ type fileCheckingNotifier struct {
 	err      error
 }
 
-func (n *fileCheckingNotifier) NotifyStart(string) error { return nil }
+func (n *fileCheckingNotifier) NotifyStart([]string) error { return nil }
 
-func (n *fileCheckingNotifier) NotifyEnd(path, command string, code int, duration time.Duration) error {
+func (n *fileCheckingNotifier) NotifyEnd(path string, args []string, code int, duration time.Duration) error {
 	n.endCalls++
 	n.path = path
 	_, n.err = os.Stat(path)

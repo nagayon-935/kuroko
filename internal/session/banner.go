@@ -12,16 +12,6 @@ import (
 	"github.com/nagayon-935/kuroko/internal/tui"
 )
 
-// ansiColor maps color name strings to ANSI foreground escape codes.
-var ansiColor = map[string]string{
-	"red":     "\x1b[31m",
-	"yellow":  "\x1b[33m",
-	"green":   "\x1b[32m",
-	"cyan":    "\x1b[36m",
-	"blue":    "\x1b[34m",
-	"magenta": "\x1b[35m",
-}
-
 const ansiReset = "\x1b[0m"
 const ansiBold = "\x1b[1m"
 
@@ -51,9 +41,9 @@ func writeBanner(w io.Writer, args []string, cfg *config.Config) {
 	}
 
 	if matchedRule != nil {
-		color := ansiColor[matchedRule.Color]
+		color := config.BannerColor(matchedRule.Color)
 		if color == "" {
-			color = ansiColor["yellow"]
+			color = config.BannerColor("yellow")
 		}
 		renderColoredBanner(w, address, hostname, matchedRule.Label, color)
 	} else {
