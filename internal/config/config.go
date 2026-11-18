@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+
+	"github.com/nagayon-935/kuroko/internal/console"
 )
 
 type Config struct {
@@ -75,6 +77,26 @@ func Load(opt Options) (*Config, error) {
 // overrides, without touching the filesystem beyond reading config.json.
 // Priority: CLI flag > env var > config.json > default.
 func Resolve(opt Options) (*Config, error) {
+	report, err := Inspect(opt)
+	if err != nil {
+		return nil, err
+	}
+	for _, issue := range report.Issues {
+		console.Warnf("%s", issue)
+	}
+	return report.Config, nil
+}
+
+// Report contains the effective settings, their file source (empty for no file),
+// and non-fatal problems discovered during resolution.
+type Report struct {
+	*Config
+	File   string
+	Issues []Issue
+}
+
+// Inspect resolves the same settings as Resolve without printing warnings.
+func Inspect(opt Options) (*Report, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
@@ -104,6 +126,8 @@ func Resolve(opt Options) (*Config, error) {
 		},
 	}
 
+	report := &Report{Config: cfg}
+
 	// 1. config.json
 	configFile := paths.ConfigFile
 	data, err := os.ReadFile(configFile)
@@ -119,6 +143,11 @@ func Resolve(opt Options) (*Config, error) {
 		if err := json.Unmarshal(data, cfg); err != nil {
 			return nil, fmt.Errorf("parsing config %s: %w", configFile, err)
 		}
+		report.File = configFile
+		report.Issues, err = unknownKeys(data)
+		if err != nil {
+			return nil, fmt.Errorf("parsing config %s: %w", configFile, err)
+		}
 	} else if !os.IsNotExist(err) {
 		return nil, fmt.Errorf("reading config %s: %w", configFile, err)
 	}
@@ -127,7 +156,9 @@ func Resolve(opt Options) (*Config, error) {
 	if v := os.Getenv("KUROKO_LOG_DIR"); v != "" {
 		cfg.LogDir = v
 	}
+	typeSource := "notifier.type"
 	if v := os.Getenv("KUROKO_NOTIFIER"); v != "" {
+		typeSource = "KUROKO_NOTIFIER"
 		cfg.Notifier.Type = v
 	}
 	if v := os.Getenv("KUROKO_WEBHOOK_URL"); v != "" {
@@ -155,5 +186,9 @@ func Resolve(opt Options) (*Config, error) {
 		cfg.LogDir = opt.LogDir
 	}
 
-	return cfg, nil
+	if cfg.Notifier.Type == "" {
+		cfg.Notifier.Type = "none"
+	}
+	report.validate(typeSource)
+	return report, nil
 }

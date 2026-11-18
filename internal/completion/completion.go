@@ -13,7 +13,7 @@ import (
 
 // subcommands are the built-in kuroko subcommand words (in addition to
 // wrapping an arbitrary PATH command).
-var subcommands = []string{"logs", "view", "export", "migrate", "grep", "help", "completion"}
+var subcommands = []string{"logs", "view", "export", "migrate", "grep", "help", "config", "completion"}
 
 // globalFlags are accepted before the subcommand/wrapped-command word.
 // Go's flag package stops parsing at the first non-flag word, so they are
@@ -35,7 +35,7 @@ var shells = []string{"bash", "zsh", "fish"}
 // non-flag word is a command for kuroko to wrap.
 var builtins = map[string]bool{
 	"logs": true, "view": true, "export": true, "migrate": true, "grep": true,
-	"help": true, "completion": true, "__complete": true,
+	"config": true, "help": true, "completion": true, "__complete": true,
 }
 
 // Candidates returns the completion candidates for the word currently being
@@ -71,6 +71,11 @@ func Candidates(ctx []string, cfg *config.Config, home string) []string {
 	case "migrate":
 		if len(p.args) == 0 {
 			return []string{"--from"}
+		}
+		return nil
+	case "config":
+		if len(p.args) == 0 {
+			return []string{"check"}
 		}
 		return nil
 	case "completion":
