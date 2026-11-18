@@ -26,10 +26,10 @@ func TestWebhookErrorsDoNotRevealTheURL(t *testing.T) {
 	for _, tt := range tests {
 		for _, kind := range []string{"discord", "slack"} {
 			t.Run(tt.name+"/"+kind, func(t *testing.T) {
-				n := New(Config{Type: kind, WebhookURL: tt.url})
+				n := New(Config{Type: kind, WebhookURL: tt.url, IncludeArgs: true, IncludeLog: true})
 
-				startErr := n.NotifyStart("ssh host")
-				endErr := n.NotifyEnd(logPath, "ssh host", 0, time.Second)
+				startErr := n.NotifyStart([]string{"ssh", "host"})
+				endErr := n.NotifyEnd(logPath, []string{"ssh", "host"}, 0, time.Second)
 
 				for _, err := range []error{startErr, endErr} {
 					if err == nil {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 )
 
 type Config struct {
@@ -28,8 +29,10 @@ type BannerRule struct {
 }
 
 type NotifierConfig struct {
-	Type       string `json:"type"` // "none", "discord", "slack"
-	WebhookURL string `json:"webhook_url"`
+	Type        string `json:"type"` // "none", "discord", "slack"
+	WebhookURL  string `json:"webhook_url"`
+	IncludeLog  bool   `json:"include_log"`
+	IncludeArgs bool   `json:"include_args"`
 }
 
 type StorageConfig struct {
@@ -129,6 +132,22 @@ func Resolve(opt Options) (*Config, error) {
 	}
 	if v := os.Getenv("KUROKO_WEBHOOK_URL"); v != "" {
 		cfg.Notifier.WebhookURL = v
+	}
+
+	for _, override := range []struct {
+		name  string
+		field *bool
+	}{
+		{"KUROKO_NOTIFIER_INCLUDE_LOG", &cfg.Notifier.IncludeLog},
+		{"KUROKO_NOTIFIER_INCLUDE_ARGS", &cfg.Notifier.IncludeArgs},
+	} {
+		if v, ok := os.LookupEnv(override.name); ok {
+			enabled, err := strconv.ParseBool(v)
+			if err != nil {
+				return nil, fmt.Errorf("parsing %s: %w", override.name, err)
+			}
+			*override.field = enabled
+		}
 	}
 
 	// 3. CLI flags (highest priority)
