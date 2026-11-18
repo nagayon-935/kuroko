@@ -31,10 +31,7 @@ func TargetDetails(args []string) (address, hostname string) {
 			resolved = resolveSSHHostname(raw, opts)
 		}
 		// hostname is the bare host part of the resolved target
-		h := resolved
-		if idx := strings.LastIndex(h, "@"); idx >= 0 {
-			h = h[idx+1:]
-		}
+		_, h := splitUserHost(resolved)
 		return raw, h
 	default:
 		return raw, raw
@@ -67,15 +64,22 @@ func generateFilename(args []string) string {
 	// Use the typed host (address without user@) as the filename component so
 	// SSH aliases like "edgeSW03" are preserved instead of being replaced by
 	// the resolved IP from ssh -G.
-	host := TargetAddress(args)
-	if idx := strings.LastIndex(host, "@"); idx >= 0 {
-		host = host[idx+1:]
-	}
+	_, host := splitUserHost(TargetAddress(args))
 
 	if host != "" && host != cmd {
 		return fmt.Sprintf("%s_%s_%s.log", ts, sanitize(cmd), sanitize(host))
 	}
 	return fmt.Sprintf("%s_%s.log", ts, sanitize(cmd))
+}
+
+// splitUserHost splits "user@host" into "user@" (with the separator, so
+// user+host reassembles the target) and "host". A target without "@" has an
+// empty user part.
+func splitUserHost(target string) (user, host string) {
+	if idx := strings.LastIndex(target, "@"); idx >= 0 {
+		return target[:idx+1], target[idx+1:]
+	}
+	return "", target
 }
 
 const sshResolveTimeout = 2 * time.Second
@@ -88,11 +92,7 @@ func resolveSSHHostname(target string, opts []string) string {
 		return target
 	}
 
-	user, host := "", target
-	if idx := strings.LastIndex(target, "@"); idx >= 0 {
-		user = target[:idx+1]
-		host = target[idx+1:]
-	}
+	user, host := splitUserHost(target)
 	if !sshconfig.ValidHost(host) {
 		return target
 	}

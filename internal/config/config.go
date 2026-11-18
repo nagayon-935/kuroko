@@ -63,7 +63,7 @@ type Options struct {
 func Load(opt Options) (*Config, error) {
 	cfg, err := Resolve(opt)
 	if err != nil {
-		return nil, err
+		return nil, err // already carries the config path
 	}
 
 	if err := os.MkdirAll(cfg.LogDir, 0o700); err != nil {
@@ -99,7 +99,7 @@ type Report struct {
 func Inspect(opt Options) (*Report, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("locating home directory: %w", err)
 	}
 
 	paths := PathsForHome(home)

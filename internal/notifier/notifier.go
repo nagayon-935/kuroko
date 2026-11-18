@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -117,7 +118,7 @@ func (d *discordNotifier) NotifyEnd(logPath string, args []string, exitCode int,
 	if err != nil {
 		return fmt.Errorf("creating file field: %w", err)
 	}
-	if _, err := fw.Write([]byte(logContent)); err != nil {
+	if _, err := io.WriteString(fw, logContent); err != nil {
 		return fmt.Errorf("writing file field: %w", err)
 	}
 
@@ -134,16 +135,7 @@ func (d *discordNotifier) NotifyEnd(logPath string, args []string, exitCode int,
 }
 
 func (d *discordNotifier) postEmbed(embed map[string]any) error {
-	body, err := json.Marshal(map[string]any{"embeds": []any{embed}})
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequest(http.MethodPost, d.WebhookURL, bytes.NewReader(body))
-	if err != nil {
-		return withoutURL(err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	return doRequest(req)
+	return postJSON(d.WebhookURL, map[string]any{"embeds": []any{embed}})
 }
 
 // --- Slack ---

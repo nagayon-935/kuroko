@@ -146,6 +146,9 @@ func appendTail(tail, p []byte) []byte {
 	return tail
 }
 
+// copyAll streams a complete (gzip) log to w in chunks, stopping early and
+// without error when ctx is cancelled. Unlike drainer it keeps no footer
+// state, because a gzip log is only written once the session has ended.
 func copyAll(ctx context.Context, path string, w io.Writer) error {
 	r, err := logstore.Open(path)
 	if err != nil {
