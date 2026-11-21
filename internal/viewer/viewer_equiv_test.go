@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/nagayon-935/kuroko/internal/logger"
+	"github.com/nagayon-935/kuroko/internal/logstore"
 )
 
 func byteLines(ss ...string) [][]byte {
@@ -350,7 +351,7 @@ func BenchmarkOldMatches(b *testing.B) {
 
 func compressForTest(t testing.TB, src string) string {
 	t.Helper()
-	gz, err := logger.CompressFile(src)
+	gz, err := logstore.CompressFile(src)
 	if err != nil {
 		t.Fatal(err)
 	}

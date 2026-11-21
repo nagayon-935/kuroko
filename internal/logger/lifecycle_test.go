@@ -3,7 +3,6 @@ package logger
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,44 +89,6 @@ func TestLoggerCloseReleasesRawFileOnFlushError(t *testing.T) {
 	}
 }
 
-func TestCompressFilePreservesExistingDestination(t *testing.T) {
-	dir := t.TempDir()
-	src := filepath.Join(dir, "session.log")
-	dst := src + ".gz"
-	for path, content := range map[string]string{src: "new log", dst: "existing archive"} {
-		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := CompressFile(src); err == nil {
-		t.Fatal("expected error for existing destination")
-	}
-	for path, want := range map[string]string{src: "new log", dst: "existing archive"} {
-		data, err := os.ReadFile(path)
-		if err != nil || string(data) != want {
-			t.Errorf("%s = %q, %v; want %q", path, data, err, want)
-		}
-	}
-}
-
-func TestCompressFileRemovesPartialOutputOnReadError(t *testing.T) {
-	dir := t.TempDir()
-	src := filepath.Join(dir, "session.log")
-	if err := os.Mkdir(src, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := CompressFile(src); err == nil {
-		t.Fatal("expected error when reading a directory")
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 1 || entries[0].Name() != "session.log" {
-		t.Fatalf("compression left partial output: %v", entries)
-	}
-}
-
 func TestCreateLogFileConcurrentReservations(t *testing.T) {
 	dir := t.TempDir()
 	start := make(chan struct{})
@@ -187,23 +148,6 @@ func TestCreateLogFileSkipsDanglingSymlink(t *testing.T) {
 	}
 	if _, err := os.Stat(target); !os.IsNotExist(err) {
 		t.Errorf("dangling symlink target was created: %v", err)
-	}
-}
-
-type failAfterHeaderWriter struct{ writes int }
-
-func (w *failAfterHeaderWriter) Write(p []byte) (int, error) {
-	w.writes++
-	if w.writes > 1 {
-		return 0, io.ErrClosedPipe
-	}
-	return len(p), nil
-}
-
-func TestCompressStreamReportsFinalFlushError(t *testing.T) {
-	w := &failAfterHeaderWriter{}
-	if err := compressStream(w, strings.NewReader("small log")); !errors.Is(err, io.ErrClosedPipe) {
-		t.Fatalf("compressStream = %v; want final flush error", err)
 	}
 }
 

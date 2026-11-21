@@ -18,6 +18,7 @@ import (
 	"github.com/nagayon-935/kuroko/internal/config"
 	"github.com/nagayon-935/kuroko/internal/console"
 	"github.com/nagayon-935/kuroko/internal/logger"
+	"github.com/nagayon-935/kuroko/internal/logstore"
 	"github.com/nagayon-935/kuroko/internal/notifier"
 )
 
@@ -116,7 +117,7 @@ func (s *Session) finishLog(exitCode int) {
 		}
 
 		if shouldCompress {
-			if compressedPath, cerr := logger.CompressFile(s.log.Path); cerr == nil {
+			if compressedPath, cerr := logstore.CompressFile(s.log.Path); cerr == nil {
 				logPath = compressedPath
 			} else {
 				console.Warnf("compression error: %v", cerr)
@@ -129,7 +130,7 @@ func (s *Session) finishLog(exitCode int) {
 	}
 
 	if s.cfg.Storage.Rotation.Enabled {
-		if rerr := logger.RotateLogs(s.cfg.LogDir, s.cfg.Storage.Rotation.MaxAgeDays, s.cfg.Storage.Rotation.MaxTotalSizeMB); rerr != nil {
+		if rerr := logstore.RotateLogs(s.cfg.LogDir, s.cfg.Storage.Rotation.MaxAgeDays, s.cfg.Storage.Rotation.MaxTotalSizeMB); rerr != nil {
 			console.Warnf("log rotation error: %v", rerr)
 		}
 	}

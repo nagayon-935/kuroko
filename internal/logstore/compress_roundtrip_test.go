@@ -1,4 +1,4 @@
-package logger
+package logstore_test
 
 import (
 	"compress/gzip"
@@ -7,14 +7,15 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nagayon-935/kuroko/internal/logger"
 	"github.com/nagayon-935/kuroko/internal/logstore"
 )
 
-// The gzip header comment is written here and parsed in logstore; this pins
+// The gzip header comment is written and parsed in logstore; this pins
 // the two sides to the same format.
 func TestCompressFileSummaryIsReadableFromGzipHeader(t *testing.T) {
 	// Arrange: a finished session log.
-	l, err := New(t.TempDir(), []string{"ssh", "sw1"}, false)
+	l, err := logger.New(t.TempDir(), []string{"ssh", "sw1"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +31,7 @@ func TestCompressFileSummaryIsReadableFromGzipHeader(t *testing.T) {
 	}
 
 	// Act
-	gzPath, err := CompressFile(l.Path)
+	gzPath, err := logstore.CompressFile(l.Path)
 	if err != nil {
 		t.Fatal(err)
 	}

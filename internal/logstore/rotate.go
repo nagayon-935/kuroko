@@ -1,118 +1,15 @@
-package logger
+package logstore
 
 import (
-	"compress/gzip"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strings"
 	"syscall"
 	"time"
-
-	"github.com/nagayon-935/kuroko/internal/logstore"
 )
-
-// createLogFile reserves a unique name atomically. A separate Stat followed
-// by a truncating OpenFile would let simultaneous sessions overwrite each
-// other, and would retry forever on stat errors other than ENOENT.
-func createLogFile(dir, filename string) (*os.File, error) {
-	ext := filepath.Ext(filename)
-	name := strings.TrimSuffix(filename, ext)
-	for i := 0; ; i++ {
-		candidate := filename
-		if i > 0 {
-			candidate = fmt.Sprintf("%s_%d%s", name, i, ext)
-		}
-		f, err := os.OpenFile(filepath.Join(dir, candidate), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-		if errors.Is(err, os.ErrExist) {
-			continue
-		}
-		if err == nil {
-			// Held until Logger.Close; migration and rotation skip open sessions.
-			if lockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); lockErr != nil {
-				name := f.Name()
-				f.Close()
-				_ = os.Remove(name)
-				return nil, lockErr
-			}
-		}
-		return f, err
-	}
-}
-
-// CompressFile publishes a complete gzip file before deleting the source.
-// Existing archives are never overwritten; on failure the source is kept
-// and any temporary output is removed.
-func CompressFile(srcPath string) (string, error) {
-	dstPath := srcPath + ".gz"
-
-	srcFile, err := os.Open(srcPath)
-	if err != nil {
-		return "", err
-	}
-	defer srcFile.Close()
-
-	dstFile, err := os.CreateTemp(filepath.Dir(srcPath), ".kuroko-compress-*")
-	if err != nil {
-		return "", err
-	}
-	defer dstFile.Close()
-	defer os.Remove(dstFile.Name())
-
-	if err := compressStreamWithComment(dstFile, srcFile, summaryComment(srcPath)); err != nil {
-		return "", err
-	}
-
-	if err := dstFile.Sync(); err != nil {
-		return "", err
-	}
-	if err := dstFile.Close(); err != nil {
-		return "", err
-	}
-	if err := srcFile.Close(); err != nil {
-		return "", err
-	}
-	// Linking within the same directory publishes the finished file in one
-	// step and fails if dstPath already exists, including a dangling symlink.
-	if err := os.Link(dstFile.Name(), dstPath); err != nil {
-		return "", err
-	}
-
-	if err := os.Remove(srcPath); err != nil {
-		return "", err
-	}
-
-	return dstPath, nil
-}
-
-// summaryComment builds the gzip header comment that lets readers learn how
-// a session ended without decompressing the archive. It returns "" when the
-// log has no complete footer (or cannot be read); that never blocks
-// compression.
-func summaryComment(srcPath string) string {
-	s, err := logstore.ReadSummary(srcPath)
-	if err != nil || s.ExitCode == nil || s.Ended.IsZero() {
-		return ""
-	}
-	return fmt.Sprintf("kuroko-summary ended=%s exit=%d", s.Ended.Format(time.RFC3339Nano), *s.ExitCode)
-}
-
-func compressStream(dst io.Writer, src io.Reader) error {
-	return compressStreamWithComment(dst, src, "")
-}
-
-func compressStreamWithComment(dst io.Writer, src io.Reader, comment string) error {
-	zw := gzip.NewWriter(dst)
-	zw.Comment = comment
-	_, copyErr := io.Copy(zw, src)
-	// gzip buffers data: a successful copy does not imply a successful
-	// archive until Close has written the compressed tail and checksum.
-	return errors.Join(copyErr, zw.Close())
-}
 
 // abandonedLogAge is how long a log without a completion footer must have
 // been untouched before retention cleanup treats it as abandoned (its session
@@ -126,6 +23,12 @@ const filenamePart = `[^/\\: *?"<>|\p{Cc}\p{Cf}]{1,96}`
 
 var sessionLogName = regexp.MustCompile(`^[0-9]{8}_[0-9]{6}_` + filenamePart + `(_` + filenamePart + `)?(_[1-9][0-9]*)?\.log(\.gz)?$`)
 
+// IsSessionLogName reports whether name looks like a log file written by a
+// kuroko session (see logger's filename generation), as opposed to a foreign
+// .log file that happens to live in the log directory. RotateLogs only ever
+// removes files that match.
+func IsSessionLogName(name string) bool { return sessionLogName.MatchString(name) }
+
 // RotateLogs scans the logDir and removes old logs based on age and total
 // session log size. Logs of sessions that are still running are never removed;
 // they still count towards the total size.
@@ -133,7 +36,7 @@ var sessionLogName = regexp.MustCompile(`^[0-9]{8}_[0-9]{6}_` + filenamePart + `
 // Only logs that are about to be removed are opened: rotation runs at the end
 // of every session, so it must not read every saved log each time.
 func RotateLogs(logDir string, maxAgeDays int, maxTotalSizeMB int) error {
-	entries, err := logstore.ListLogFiles(logDir)
+	entries, err := ListLogFiles(logDir)
 	if err != nil {
 		return err
 	}
@@ -161,7 +64,7 @@ func RotateLogs(logDir string, maxAgeDays int, maxTotalSizeMB int) error {
 	}
 
 	for _, entry := range entries {
-		if !sessionLogName.MatchString(filepath.Base(entry.Path)) {
+		if !IsSessionLogName(filepath.Base(entry.Path)) {
 			continue
 		}
 		info, err := entry.Info()
@@ -219,7 +122,7 @@ func removeRotationCandidate(path string, idle time.Duration) (bool, error) {
 	}
 	defer f.Close()
 	lockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-	identified, finished := logstore.RotationMetadata(f)
+	identified, finished := RotationMetadata(f)
 	if !identified {
 		return true, nil
 	}

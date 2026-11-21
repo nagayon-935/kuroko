@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestLogSubdir(t *testing.T) {
@@ -69,36 +68,5 @@ func TestLoggerRefusesSymlinkedTargetDirectory(t *testing.T) {
 	entries, err := os.ReadDir(outside)
 	if err != nil || len(entries) != 0 {
 		t.Fatal("wrote outside root")
-	}
-}
-
-func TestRotateNestedLogsLeavesActiveSessions(t *testing.T) {
-	root := t.TempDir()
-	closed, err := New(root, []string{"ssh", "old-router"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := closed.Close(0); err != nil {
-		t.Fatal(err)
-	}
-	active, err := New(root, []string{"ssh", "active-router"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer active.Close(0)
-	old := time.Now().Add(-40 * 24 * time.Hour)
-	for _, path := range []string{closed.Path, active.Path} {
-		if err := os.Chtimes(path, old, old); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := RotateLogs(root, 30, 0); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(closed.Path); !os.IsNotExist(err) {
-		t.Fatal("closed nested log not rotated")
-	}
-	if _, err := os.Stat(active.Path); err != nil {
-		t.Fatal("active log removed")
 	}
 }

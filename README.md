@@ -559,11 +559,11 @@ kuroko/
 │   │   ├── nw_prompt.go        # ネットワーク機器プロンプトの検出
 │   │   ├── redact.go           # 認証情報のマスキング
 │   │   ├── escape.go           # エスケープシーケンスと改行コードの処理
-│   │   ├── storage.go          # ファイル名の確保・圧縮・ローテーション
+│   │   ├── logfile.go          # ログファイル名の一意な確保（排他作成・ロック）
 │   │   └── target.go           # 接続先名とログファイル名の生成
 │   ├── session/session.go      # PTY セッション制御
 │   ├── notifier/notifier.go    # 外部通知（Discord / Slack）
-│   ├── logstore/               # ログ列挙・圧縮ログの読み込み・セッション情報・直近ログの解決
+│   ├── logstore/               # ログ列挙・圧縮（compress.go）・ローテーション（rotate.go）・圧縮ログの読み込み・セッション情報・直近ログの解決
 │   ├── migration/              # 検証付きの旧ログ・設定の移行と元ファイル削除
 │   ├── completion/completion.go # シェル補完の候補計算・スクリプト生成
 │   ├── textwidth/              # 端末表示幅の計算・切り詰め・パディング
