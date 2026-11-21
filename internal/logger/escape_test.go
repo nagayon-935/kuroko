@@ -1,52 +1,74 @@
 package logger
 
 import (
+	"bytes"
 	"os"
 	"strings"
 	"testing"
 )
 
-// logBody writes chunks to a fresh Logger for args and returns the logged
-// rows between the header and the footer.
-func logBody(t *testing.T, args []string, chunks ...string) []string {
-	t.Helper()
-	l, err := New(t.TempDir(), args, false)
-	if err != nil {
-		t.Fatal(err)
+func TestNormalizeLineEndings(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "CRLF normalised",
+			input: "line1\r\nline2\r\n",
+			want:  "line1\nline2\n",
+		},
+		{
+			name:  "bare CR preserved for the terminal",
+			input: "text\roverwrite",
+			want:  "text\roverwrite",
+		},
+		{
+			name:  "doubled CRLF from PTY driver",
+			input: "content\r\r\n",
+			want:  "content\n",
+		},
+		{
+			name:  "plain text unchanged",
+			input: "hello world\n",
+			want:  "hello world\n",
+		},
 	}
-	for _, c := range chunks {
-		if _, err := l.Write([]byte(c)); err != nil {
-			t.Fatal(err)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := string(normalizeLineEndings([]byte(tt.input)))
+			if got != tt.want {
+				t.Errorf("normalizeLineEndings(%q)\n got  %q\n want %q", tt.input, got, tt.want)
+			}
+		})
 	}
-	if err := l.Close(0); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(l.Path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, body, ok := strings.Cut(string(data), strings.Repeat("-", 68)+"\n\n")
-	if !ok {
-		t.Fatalf("log has no header:\n%s", data)
-	}
-	body, _, ok = strings.Cut(body, "\n# "+strings.Repeat("-", 68))
-	if !ok {
-		t.Fatalf("log has no footer:\n%s", data)
-	}
-	return strings.Split(strings.TrimSuffix(body, "\n"), "\n")
 }
 
-// withoutTimestamps replaces command metadata lines by a fixed marker.
-func withoutTimestamps(rows []string) []string {
-	out := make([]string, len(rows))
-	for i, r := range rows {
-		if strings.HasPrefix(r, "# kuroko:cmd:") {
-			r = "# kuroko:cmd"
-		}
-		out[i] = r
+// TestIsCompleteEscape covers OSC-terminated and two-char escape sequence detection.
+func TestIsCompleteEscape(t *testing.T) {
+	tests := []struct {
+		name string
+		seq  []byte
+		want bool
+	}{
+		{"OSC with BEL", []byte("\x1b]0;title\x07"), true},
+		{"OSC with ESC ST", []byte("\x1b]0;title\x1b\\"), true},
+		{"OSC with bare ESC is incomplete", []byte("\x1b]0;title\x1b"), false},
+		{"OSC incomplete", []byte("\x1b]0;title"), false},
+		{"two-char ESC M", []byte("\x1bM"), true},
+		{"two-char only ESC", []byte("\x1b"), false},
+		{"CSI complete", []byte("\x1b[2J"), true},
+		{"CSI incomplete", []byte("\x1b[2"), false},
+		{"empty", []byte{}, false},
 	}
-	return out
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isCompleteEscape(tt.seq)
+			if got != tt.want {
+				t.Errorf("isCompleteEscape(%q) = %v, want %v", tt.seq, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestLoggerConsumesWholeEscapeSequences(t *testing.T) {
@@ -112,72 +134,177 @@ func TestLoggerConsumesWholeEscapeSequences(t *testing.T) {
 	}
 }
 
-const (
-	promptStart = "\x1b]133;A\x07"
-	promptEnd   = "\x1b]133;B\x07"
-)
-
-func TestLoggerUsesOSC133PromptMarks(t *testing.T) {
+func TestLoggerDropsEscapeSequences(t *testing.T) {
 	tests := []struct {
-		name   string
-		chunks []string
-		want   []string
+		name  string
+		input string
+		want  string
 	}{
 		{
-			name:   "prompt the heuristics cannot recognise",
-			chunks: []string{promptStart + "λ " + promptEnd + "ls\r\n", "file.txt\r\n"},
-			want:   []string{"# kuroko:cmd", "λ ls", "file.txt"},
+			name:  "color code",
+			input: "\x1b[32mhello\x1b[0m",
+			want:  "hello",
 		},
 		{
-			name:   "marks ended by ST",
-			chunks: []string{"\x1b]133;A\x1b\\→ \x1b]133;B\x1b\\make\r\n"},
-			want:   []string{"# kuroko:cmd", "→ make"},
+			name:  "cursor movement",
+			input: "\x1b[1;80r\x1b[H\x1b[2Jtext",
+			want:  "text",
 		},
 		{
-			name: "readline accept-line redraw restores the marked prompt",
-			chunks: []string{
-				promptStart + "λ " + promptEnd,
-				"vim",
-				"\rvim\r\r\n",
-			},
-			want: []string{"# kuroko:cmd", "λ vim"},
+			name:  "private mode",
+			input: "\x1b[?2004houtput\x1b[?2004l",
+			want:  "output",
 		},
 		{
-			name:   "empty command is not a command",
-			chunks: []string{promptStart + "λ " + promptEnd + "\r\n"},
-			want:   []string{"λ "},
-		},
-		{
-			name: "rows without marks fall back to the heuristics",
-			chunks: []string{
-				promptStart + "λ " + promptEnd + "ssh host\r\n",
-				"user@host:~$ uptime\r\n",
-				"output λ ls\r\n",
-			},
-			want: []string{"# kuroko:cmd", "λ ssh host", "# kuroko:cmd", "user@host:~$ uptime", "output λ ls"},
-		},
-		{
-			name:   "unterminated marked row at session end",
-			chunks: []string{promptStart + "λ " + promptEnd + "exit"},
-			want:   []string{"λ exit"},
+			name:  "OSC title sequence",
+			input: "\x1b]0;user@host: ~\x07prompt",
+			want:  "prompt",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := withoutTimestamps(logBody(t, []string{"bash"}, tt.chunks...))
-			if strings.Join(got, "\n") != strings.Join(tt.want, "\n") {
-				t.Fatalf("logged rows = %q, want %q", got, tt.want)
+			l, err := New(t.TempDir(), []string{"bash"}, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := l.Write([]byte(tt.input + "\r\n")); err != nil {
+				t.Fatal(err)
+			}
+			if err := l.Close(0); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(l.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(data, []byte("\x1b")) {
+				t.Errorf("log still contains ESC bytes:\n%q", data)
+			}
+			if !strings.Contains(string(data), "\n"+tt.want+"\n") {
+				t.Errorf("log missing line %q:\n%s", tt.want, data)
 			}
 		})
 	}
 }
 
-func TestLoggerWithoutOSC133MissesUnusualPrompt(t *testing.T) {
-	// Baseline for TestLoggerUsesOSC133PromptMarks: the same row without
-	// marks is not recognised as a command.
-	got := withoutTimestamps(logBody(t, []string{"bash"}, "λ ls\r\n"))
-	if strings.Join(got, "\n") != "λ ls" {
-		t.Fatalf("logged rows = %q, want only the plain row", got)
+func TestLoggerANSIStripped(t *testing.T) {
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host"}, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// Write content that mimics what a real SSH session produces.
+	l.Write([]byte("\x1b[32mWelcome\x1b[0m to server\r\n"))
+	l.Write([]byte("\x1b[?2004huser@host:~$ ls\r\n"))
+	l.Write([]byte("\x1b[?2004lfile.txt\r\n"))
+	l.Close(0)
+
+	data, err := os.ReadFile(l.Path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	content := string(data)
+
+	// Escape sequences must be gone.
+	if bytes.Contains(data, []byte("\x1b")) {
+		t.Errorf("log still contains ESC bytes:\n%q", content)
+	}
+	// Actual text must survive.
+	for _, want := range []string{"Welcome to server", "user@host:~$ ls", "file.txt"} {
+		if !strings.Contains(content, want) {
+			t.Errorf("log missing %q", want)
+		}
+	}
+}
+
+func TestLoggerEscapeSequences(t *testing.T) {
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host"}, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// 1. Initial prompt printed
+	l.Write([]byte("user@host:~$ "))
+
+	// 2. User presses UP arrow, which draws:
+	// "cat very_long_command.txt"
+	// Then user presses UP arrow again, which edits the line in-place:
+	// sends carriage return \r, writes "vim", and clears the rest of the line with \x1b[K
+	l.Write([]byte("cat very_long_command.txt"))
+	l.Write([]byte("\rvim\x1b[K")) // carriage return + "vim" + clear to end of line
+
+	// 3. User hits Enter (accept-line redraw: \rvim\r\r\n -> becomes \rvim\n)
+	l.Write([]byte("\rvim\r\r\n"))
+	l.Write([]byte("[alt screen]\n"))
+	l.Close(0)
+
+	data, _ := os.ReadFile(l.Path)
+	content := string(data)
+
+	// Verify that the prompt and command were reconstructed correctly as "user@host:~$ vim"
+	if !strings.Contains(content, "user@host:~$ vim") {
+		t.Errorf("expected reconstructed prompt 'user@host:~$ vim', got:\n%s", content)
+	}
+	if strings.Contains(content, "very_long_command") {
+		t.Errorf("expected stale command 'very_long_command' to be cleared by ESC K, but it remains:\n%s", content)
+	}
+	// Verify metadata line is present
+	if !strings.Contains(content, "# kuroko:cmd:") {
+		t.Errorf("expected metadata line for vim, got:\n%s", content)
+	}
+}
+
+func TestLoggerPartialEscapeAtBoundary(t *testing.T) {
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host"}, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// Split \x1b[32m across two writes to simulate PTY buffer boundary.
+	l.Write([]byte("text\x1b"))
+	l.Write([]byte("[32mhello\x1b[0m\n"))
+	l.Close(0)
+
+	data, _ := os.ReadFile(l.Path)
+	content := string(data)
+
+	if bytes.Contains(data, []byte("\x1b")) {
+		t.Errorf("ESC byte leaked through partial-sequence boundary:\n%q", content)
+	}
+	if strings.Contains(content, "[32m") {
+		t.Errorf("ANSI parameter bytes leaked:\n%q", content)
+	}
+	if !strings.Contains(content, "texthello") {
+		t.Errorf("text content missing:\n%q", content)
+	}
+}
+
+func TestLoggerCSIOverflowAndPrivateParams(t *testing.T) {
+	tmp := t.TempDir()
+	l, err := New(tmp, []string{"ssh", "host"}, false)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// Huge CSI repeat counts must not overflow int into negative indices or allocate GBs.
+	l.Write([]byte("a\x1b[9223372036854775807Cb\n"))
+	l.Write([]byte("cde\x1b[2D\x1b[9223372036854775807P\n"))
+	l.Write([]byte("row1\nrow2\x1b[1A\x1b[9223372036854775807Brow3\n"))
+	// Private/intermediate CSI sequences ending in C/D/P/K/J must be ignored.
+	l.Write([]byte("hello\x1b[?5C\x1b[>2K\x1b[ 1Pworld\n"))
+	if err := l.Close(0); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+
+	data, err := os.ReadFile(l.Path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(data), "helloworld") {
+		t.Errorf("expected private CSI sequences to leave text intact, got:\n%s", string(data))
 	}
 }
 

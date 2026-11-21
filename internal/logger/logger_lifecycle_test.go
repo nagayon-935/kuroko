@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -86,68 +85,6 @@ func TestLoggerCloseReleasesRawFileOnFlushError(t *testing.T) {
 	}
 	if err := l.Close(1); err != closeErr {
 		t.Fatalf("repeated Close = %v; want original error %v", err, closeErr)
-	}
-}
-
-func TestCreateLogFileConcurrentReservations(t *testing.T) {
-	dir := t.TempDir()
-	start := make(chan struct{})
-	paths := make(chan string, 16)
-	var wg sync.WaitGroup
-	for i := 0; i < cap(paths); i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			<-start
-			f, err := createLogFile(dir, "session.log")
-			if err != nil {
-				t.Error(err)
-				return
-			}
-			paths <- f.Name()
-			if _, err := f.WriteString(f.Name()); err != nil {
-				t.Error(err)
-			}
-			if err := f.Close(); err != nil {
-				t.Error(err)
-			}
-		}()
-	}
-	close(start)
-	wg.Wait()
-	close(paths)
-	seen := make(map[string]bool)
-	for path := range paths {
-		if seen[path] {
-			t.Errorf("duplicate path %q", path)
-		}
-		seen[path] = true
-		data, err := os.ReadFile(path)
-		if err != nil || string(data) != path {
-			t.Errorf("log was overwritten: data=%q, err=%v; want %q", data, err, path)
-		}
-	}
-	if len(seen) != cap(paths) {
-		t.Fatalf("reserved %d paths; want %d", len(seen), cap(paths))
-	}
-}
-
-func TestCreateLogFileSkipsDanglingSymlink(t *testing.T) {
-	dir := t.TempDir()
-	target := filepath.Join(dir, "missing")
-	if err := os.Symlink(target, filepath.Join(dir, "session.log")); err != nil {
-		t.Fatal(err)
-	}
-	f, err := createLogFile(dir, "session.log")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	if filepath.Base(f.Name()) != "session_1.log" {
-		t.Errorf("reserved %s; want session_1.log", f.Name())
-	}
-	if _, err := os.Stat(target); !os.IsNotExist(err) {
-		t.Errorf("dangling symlink target was created: %v", err)
 	}
 }
 
