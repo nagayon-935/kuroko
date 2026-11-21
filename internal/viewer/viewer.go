@@ -2,6 +2,7 @@ package viewer
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
@@ -111,13 +112,19 @@ func loadSession(logPath string) (*Viewer, error) {
 // preallocated from the file size, avoiding the doubling growth (and the
 // transient ~2x memory) of io.ReadAll. If the file grows while reading,
 // bytes.Buffer simply grows; if it shrinks, the shorter data is returned.
-// Compressed logs (decided the same way as logstore.Open) have an unknown
-// decompressed size and keep using io.ReadAll.
+// Compressed logs (decided the same way as logstore.Open) are sized from the
+// gzip trailer when it looks plausible (see gzipSizeHint), else just grow.
 func readLog(r io.Reader, logPath string) ([]byte, error) {
-	if strings.HasSuffix(logPath, ".gz") {
-		return io.ReadAll(r)
-	}
 	var buf bytes.Buffer
+	if strings.HasSuffix(logPath, ".gz") {
+		if n := gzipSizeHint(logPath); n > 0 {
+			buf.Grow(n + bytes.MinRead)
+		}
+		if _, err := buf.ReadFrom(r); err != nil {
+			return nil, err
+		}
+		return buf.Bytes(), nil
+	}
 	if info, err := os.Stat(logPath); err == nil && info.Size() > 0 {
 		buf.Grow(int(info.Size()) + bytes.MinRead)
 	}
@@ -125,6 +132,37 @@ func readLog(r io.Reader, logPath string) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// gzipSizeHint returns the decompressed size recorded in the trailing ISIZE
+// field of the gzip file at path, or 0 when it is unavailable or implausible.
+// ISIZE is the size mod 2^32 of the last member only, so it is just a hint:
+// it must be positive, at most maxDeflateRatio times the compressed size
+// (deflate cannot expand data more than that) and at most 1 GiB.
+// Any error means "no hint".
+// maxDeflateRatio is deflate's theoretical maximum compression ratio
+// (about 1032:1), so a larger ISIZE cannot belong to this file.
+const maxDeflateRatio = 1032
+
+func gzipSizeHint(path string) int {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || info.Size() < 4 {
+		return 0
+	}
+	var tail [4]byte
+	if _, err := f.ReadAt(tail[:], info.Size()-4); err != nil {
+		return 0
+	}
+	n := int64(binary.LittleEndian.Uint32(tail[:]))
+	if n <= 0 || n > maxDeflateRatio*info.Size() || n > 1<<30 {
+		return 0
+	}
+	return int(n)
 }
 
 // outputLinePrefix marks metadata lines that are hidden from the output pane.

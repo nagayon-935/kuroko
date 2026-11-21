@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func writeLog(t *testing.T, dir, rel, content string) string {
@@ -227,15 +228,30 @@ func TestCollectReturnsTheSameMatchesAsSearch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var got strings.Builder
+	var got, want strings.Builder
 	for _, m := range matches {
 		if !filepath.IsAbs(m.Path) || !strings.HasSuffix(m.Path, filepath.FromSlash(m.RelativePath)) {
 			t.Errorf("Path %q is not the absolute path of %q", m.Path, m.RelativePath)
 		}
 		got.WriteString(m.RelativePath + ":" + strconv.Itoa(m.Line) + ":" + m.Text + "\n")
 	}
-	if got.String() != out.String() {
-		t.Errorf("Collect rows differ from Search output:\n%.300q\n%.300q", got.String(), out.String())
+	for _, line := range strings.SplitAfter(out.String(), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(strings.TrimSuffix(line, "\n"), ":", 3)
+		text := parts[2]
+		if len(text) > MaxMatchTextBytes {
+			cut := MaxMatchTextBytes
+			for cut > 0 && !utf8.RuneStart(text[cut]) {
+				cut--
+			}
+			text = text[:cut]
+		}
+		want.WriteString(parts[0] + ":" + parts[1] + ":" + text + "\n")
+	}
+	if got.String() != want.String() {
+		t.Errorf("Collect rows differ from truncated Search output:\n%.300q\n%.300q", got.String(), want.String())
 	}
 	if cres.Matched != sres.Matched || cres.Skipped != sres.Skipped || cres.Capped || collectWarn.String() != searchWarn.String() {
 		t.Errorf("results differ: %+v vs %+v", cres, sres)
@@ -286,5 +302,41 @@ func TestCollectSkipsUnreadableLogsAndMissingDir(t *testing.T) {
 	}
 	if m, res, err := Collect(filepath.Join(dir, "nope"), regexp.MustCompile("x"), 0, &warn); err != nil || m != nil || res.Matched {
 		t.Fatalf("missing dir: %v, %+v, %v", m, res, err)
+	}
+}
+
+func TestCollectTruncatesTextAtRuneBoundary(t *testing.T) {
+	// "あ" is 3 bytes; 1 ("x") + 3*k puts the cut (1024) mid-rune for both
+	// offsets below.
+	for _, prefix := range []string{"x", "xx", "xxx"} {
+		dir := t.TempDir()
+		line := prefix + strings.Repeat("あ", 2000/3)
+		writeLog(t, dir, "a.log", line+"\n")
+		matches, _, err := Collect(dir, regexp.MustCompile("あ"), 0, &bytes.Buffer{})
+		if err != nil || len(matches) != 1 {
+			t.Fatalf("Collect = %v, %v", matches, err)
+		}
+		got := matches[0].Text
+		if len(got) > MaxMatchTextBytes || !utf8.ValidString(got) {
+			t.Errorf("prefix %q: Text len=%d valid=%v; want <= %d and valid UTF-8", prefix, len(got), utf8.ValidString(got), MaxMatchTextBytes)
+		}
+		if !strings.HasPrefix(line, got) || MaxMatchTextBytes-len(got) >= utf8.UTFMax {
+			t.Errorf("prefix %q: Text is not the longest rune-aligned prefix (len %d)", prefix, len(got))
+		}
+	}
+}
+
+func TestCollectKeepsShortTextAndInvalidBytes(t *testing.T) {
+	dir := t.TempDir()
+	writeLog(t, dir, "a.log", "hit \xff\xfe\n"+"hit "+strings.Repeat("\xff", 2000)+"\n")
+	matches, _, err := Collect(dir, regexp.MustCompile("hit"), 0, &bytes.Buffer{})
+	if err != nil || len(matches) != 2 {
+		t.Fatalf("Collect = %v, %v", matches, err)
+	}
+	if matches[0].Text != "hit \xff\xfe" {
+		t.Errorf("short text = %q", matches[0].Text)
+	}
+	if len(matches[1].Text) != MaxMatchTextBytes {
+		t.Errorf("invalid-byte text len = %d; want %d", len(matches[1].Text), MaxMatchTextBytes)
 	}
 }

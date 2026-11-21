@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"unicode/utf8"
 
 	"github.com/nagayon-935/kuroko/internal/logstore"
 )
@@ -19,6 +20,11 @@ import (
 // deliberately truncated to this length (the remainder is skipped, not
 // matched); the line still counts as one line for numbering.
 const MaxLineBytes = 1 << 20
+
+// MaxMatchTextBytes caps Match.Text. Collect can hold thousands of matches
+// and callers only show a one-row preview, so the stored text is cut here
+// (at a rune boundary) instead of keeping up to MaxLineBytes per match.
+const MaxMatchTextBytes = 1024
 
 var metaPrefix = []byte("# kuroko:cmd:")
 
@@ -58,7 +64,8 @@ type Match struct {
 	// Line is the 1-based line number in the raw (decompressed) log.
 	Line int
 	// Text is the line as Search prints it (truncated to MaxLineBytes, with
-	// the line terminator and one trailing CR removed).
+	// the line terminator and one trailing CR removed), further cut to at
+	// most MaxMatchTextBytes without splitting a UTF-8 rune.
 	Text string
 }
 
@@ -79,13 +86,27 @@ func Collect(dir string, re *regexp.Regexp, limit int, warn io.Writer) ([]Match,
 				capped = true
 				return true, nil
 			}
-			matches = append(matches, Match{Path: f.Path, RelativePath: f.RelativePath, Line: n, Text: string(text)})
+			matches = append(matches, Match{Path: f.Path, RelativePath: f.RelativePath, Line: n, Text: truncateText(text)})
 			return false, nil
 		})
 		return matched, capped, err
 	})
 	res.Capped = capped
 	return matches, res, err
+}
+
+// truncateText returns a copy of text of at most MaxMatchTextBytes bytes,
+// backing off to a rune boundary so a multi-byte rune is never split. The
+// copy keeps the result from retaining the caller's buffer.
+func truncateText(text []byte) string {
+	if len(text) <= MaxMatchTextBytes {
+		return string(text)
+	}
+	cut := MaxMatchTextBytes
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return string(text[:cut])
 }
 
 // scanLogs runs scan over every log under dir in relative-path order. scan
