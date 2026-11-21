@@ -218,18 +218,29 @@ func exportCandidates(args []string, logDir string) []string {
 
 // viewCandidates follows view's flags, which must precede its log file
 // (flag parsing stops at the first non-flag word): --last replaces the
-// file, --follow/-f may be combined with either.
+// file, --follow/-f and --line N may be combined with either but not with
+// each other. The line number is free text, so nothing is offered for it.
 func viewCandidates(args []string, logDir string) []string {
-	var hasLast, hasFollow bool
-	for _, arg := range args {
+	var hasLast, hasFollow, hasLine bool
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
 		if !strings.HasPrefix(arg, "-") || arg == "-" || arg == "--" {
 			return nil // the log file was given (or "--" ended the flags)
 		}
-		switch strings.TrimLeft(arg, "-") {
+		name, _, hasValue := strings.Cut(strings.TrimLeft(arg, "-"), "=")
+		switch name {
 		case "last":
 			hasLast = true
 		case "follow", "f":
 			hasFollow = true
+		case "line":
+			hasLine = true
+			if !hasValue {
+				if i+1 >= len(args) {
+					return nil // completing the line number itself
+				}
+				i++
+			}
 		default:
 			return nil
 		}
@@ -239,13 +250,19 @@ func viewCandidates(args []string, logDir string) []string {
 		result = append(logFileNames(logDir), "--last")
 	}
 	if !hasFollow {
-		result = append(result, "--follow", "-f")
+		if !hasLine {
+			result = append(result, "--follow", "-f")
+		}
+	}
+	if !hasLine && !hasFollow {
+		result = append(result, "--line")
 	}
 	return result
 }
 
 // grepCandidates offers grep's flags until the pattern (free text, so never
-// completed) is typed. Flags are only recognised before the pattern.
+// completed) is typed. Flags are only recognised before the pattern. --open
+// and -l are mutually exclusive.
 func grepCandidates(args []string) []string {
 	seen := map[string]bool{}
 	for _, arg := range args {
@@ -255,10 +272,14 @@ func grepCandidates(args []string) []string {
 		seen[strings.TrimLeft(arg, "-")] = true
 	}
 	var result []string
-	for _, f := range []string{"i", "l"} {
-		if !seen[f] {
-			result = append(result, "-"+f)
-		}
+	if !seen["i"] {
+		result = append(result, "-i")
+	}
+	if !seen["l"] && !seen["open"] {
+		result = append(result, "-l")
+	}
+	if !seen["open"] && !seen["l"] {
+		result = append(result, "--open")
 	}
 	return result
 }

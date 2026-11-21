@@ -36,6 +36,10 @@ func (v *Viewer) draw() {
 	// Left pane: 35% of width, min 30 chars
 	leftWidth, rightWidth := paneWidths(v.width)
 	bodyHeight := v.bodyHeight()
+	if v.revealHighlight {
+		v.revealHighlight = false
+		v.scrollToLine(v.highlight-1, bodyHeight)
+	}
 	v.timelineScroll = tui.FollowSelection(v.selected, v.timelineScroll, bodyHeight)
 
 	out.WriteString(tui.Inverse(textwidth.Fit(v.headerText(), v.width)) + tui.ClearEOL + "\r\n")
@@ -112,8 +116,12 @@ func (v *Viewer) outputCell(r, width int) string {
 
 	for idx, ml := range v.matchLines {
 		if ml == lineIdx {
-			return highlightQuery(text, v.outputQuery, idx == v.activeMatch)
+			text = highlightQuery(text, v.outputQuery, idx == v.activeMatch)
+			break
 		}
+	}
+	if lineIdx == v.highlight-1 {
+		text = tui.Mark(text)
 	}
 	return text
 }

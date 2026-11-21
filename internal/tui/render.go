@@ -34,6 +34,17 @@ func Inverse(s string) string {
 	return "\x1b[30;47m" + s + reset
 }
 
+// markStyle is bold on a blue background: a background (unlike reverse
+// video) is overridden cleanly by nested highlights such as search matches.
+const markStyle = "\x1b[1;37;44m"
+
+// Mark renders s as a marked line. Style resets inside s (for example from
+// search-match highlights) are followed by the mark style again, so the mark
+// continues around nested highlights.
+func Mark(s string) string {
+	return markStyle + strings.ReplaceAll(s, reset, reset+markStyle) + reset
+}
+
 // Yellow renders s in yellow.
 func Yellow(s string) string {
 	return "\x1b[33m" + s + reset

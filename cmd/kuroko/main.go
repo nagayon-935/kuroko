@@ -50,6 +50,8 @@ Examples:
   kuroko view --last     View the most recent session
   kuroko view --follow --last  Follow the most recent session as it runs (-f)
   kuroko grep -i 'error|down'  Search all saved logs (-l: names only)
+  kuroko grep --open -i 'error'  Open the match in the viewer (pick one if several)
+  kuroko view --last --line 120  Open at raw line 120 (a line number from grep)
   kuroko export --last --command 1 -o command.txt  Export a command and output
   kuroko export <logfile>  Export an entire session to stdout
   kuroko config check   Show effective settings and report configuration issues
@@ -63,6 +65,13 @@ still rewrite.
 kuroko grep prints <path>:<line>:<text> per match (Go/RE2 syntax). It exits 0 if
 anything matched, 1 if nothing matched, and 2 on any error (including logs that
 could not be read).
+
+kuroko grep --open collects the matches and opens the command whose output
+contains the line: the viewer directly for one match, a list to choose from
+for several (first 10000). Enter opens, q/Esc quits. It needs a terminal, and
+cannot be combined with -l. kuroko view [--last | <logfile>] --line N does the
+same for a line number as grep prints it (N counts every line of the raw log);
+it cannot be combined with --follow.
 
 Logs are saved to ~/.kuroko/logs/ by default.
 
@@ -143,14 +152,27 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "view":
 		viewArgs, following := splitFollowFlag(rest[1:])
 		if following {
+			if _, _, hasLine, _ := splitLineFlag(viewArgs); hasLine {
+				return fail("view error: --line cannot be combined with --follow")
+			}
 			if err := runFollow(viewArgs, logDir, stdout); err != nil {
 				return fail("view error: %v", err)
 			}
 			return 0
 		}
-		path, err := resolveLogArgument(rest[1:], logDir)
+		viewArgs, line, hasLine, err := splitLineFlag(viewArgs)
 		if err != nil {
 			return fail("view error: %v", err)
+		}
+		path, err := resolveLogArgument(viewArgs, logDir)
+		if err != nil {
+			return fail("view error: %v", err)
+		}
+		if hasLine {
+			if err := openAtLine(path, line); err != nil {
+				return fail("viewer error: %v", err)
+			}
+			return 0
 		}
 		if err := viewer.Run(path); err != nil {
 			return fail("viewer error: %v", err)

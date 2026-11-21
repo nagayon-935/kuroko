@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -206,5 +207,84 @@ func TestSearchFailingWarningWriterIsAnError(t *testing.T) {
 	_, err := Search(dir, regexp.MustCompile("x"), Options{}, &bytes.Buffer{}, failWriter{})
 	if err == nil {
 		t.Fatal("Search() = nil; want error when warnings cannot be written")
+	}
+}
+
+func TestCollectReturnsTheSameMatchesAsSearch(t *testing.T) {
+	dir := t.TempDir()
+	writeLog(t, dir, "ssh/b/20260101_000000_ssh_b.log", "ok\r\nlink down\r\n# kuroko:cmd:down\nlast down")
+	writeGz(t, dir, "ssh/a/20260101_000000_ssh_a.log.gz", "link down\nfine\n\ndown again\n")
+	writeLog(t, dir, "ssh/c/long.log", "down "+strings.Repeat("x", MaxLineBytes+50)+"\nshort down\n")
+	re := regexp.MustCompile("down")
+	var out, searchWarn, collectWarn bytes.Buffer
+
+	sres, err := Search(dir, re, Options{}, &out, &searchWarn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	matches, cres, err := Collect(dir, re, 0, &collectWarn)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got strings.Builder
+	for _, m := range matches {
+		if !filepath.IsAbs(m.Path) || !strings.HasSuffix(m.Path, filepath.FromSlash(m.RelativePath)) {
+			t.Errorf("Path %q is not the absolute path of %q", m.Path, m.RelativePath)
+		}
+		got.WriteString(m.RelativePath + ":" + strconv.Itoa(m.Line) + ":" + m.Text + "\n")
+	}
+	if got.String() != out.String() {
+		t.Errorf("Collect rows differ from Search output:\n%.300q\n%.300q", got.String(), out.String())
+	}
+	if cres.Matched != sres.Matched || cres.Skipped != sres.Skipped || cres.Capped || collectWarn.String() != searchWarn.String() {
+		t.Errorf("results differ: %+v vs %+v", cres, sres)
+	}
+}
+
+func TestCollectLimitAndRelativeDir(t *testing.T) {
+	dir := t.TempDir()
+	writeLog(t, dir, "a.log", "hit 1\nhit 2\n")
+	writeLog(t, dir, "b.log", "hit 3\n")
+	tests := []struct {
+		name       string
+		limit      int
+		wantLen    int
+		wantCapped bool
+	}{
+		{"unlimited", 0, 3, false},
+		{"limit equal to the matches is not capped", 3, 3, false},
+		{"limit below the matches is capped", 2, 2, true},
+		{"limit of one", 1, 1, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			matches, res, err := Collect(dir, regexp.MustCompile("hit"), tt.limit, &bytes.Buffer{})
+			if err != nil || len(matches) != tt.wantLen || res.Capped != tt.wantCapped || !res.Matched {
+				t.Fatalf("Collect = %d matches, %+v, %v; want %d, capped=%v", len(matches), res, err, tt.wantLen, tt.wantCapped)
+			}
+		})
+	}
+
+	t.Chdir(dir)
+	matches, _, err := Collect(".", regexp.MustCompile("hit 3"), 0, &bytes.Buffer{})
+	if err != nil || len(matches) != 1 || !filepath.IsAbs(matches[0].Path) {
+		t.Fatalf("relative dir: %+v, %v; want one absolute path", matches, err)
+	}
+}
+
+func TestCollectSkipsUnreadableLogsAndMissingDir(t *testing.T) {
+	dir := t.TempDir()
+	writeLog(t, dir, "a.log.gz", "not gzip")
+	writeLog(t, dir, "b.log", "hit\n")
+	var warn bytes.Buffer
+
+	matches, res, err := Collect(dir, regexp.MustCompile("hit"), 0, &warn)
+
+	if err != nil || len(matches) != 1 || res.Skipped != 1 || !strings.Contains(warn.String(), "skipping a.log.gz") {
+		t.Fatalf("got %d matches, %+v, %v, %q", len(matches), res, err, warn.String())
+	}
+	if m, res, err := Collect(filepath.Join(dir, "nope"), regexp.MustCompile("x"), 0, &warn); err != nil || m != nil || res.Matched {
+		t.Fatalf("missing dir: %v, %+v, %v", m, res, err)
 	}
 }

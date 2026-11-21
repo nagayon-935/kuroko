@@ -58,6 +58,12 @@ type Viewer struct {
 	outputScroll       int
 	timelineScroll     int
 	currentOutputLines [][]byte // sub-slices of logData (read-only)
+	// highlight is the 1-based index into currentOutputLines of the line
+	// RunAtLine pointed at (0 = none). It is cleared when the output changes.
+	highlight int
+	// revealHighlight asks the next draw to scroll the highlight into view,
+	// because the terminal size is unknown until the first frame.
+	revealHighlight bool
 }
 
 func Run(logPath string) error {
@@ -163,6 +169,8 @@ func (v *Viewer) updateOutput() {
 	v.matchLines = nil
 	v.activeMatch = -1
 	v.outputScroll = 0
+	v.highlight = 0
+	v.revealHighlight = false
 
 	if len(v.filteredIdx) == 0 {
 		return
