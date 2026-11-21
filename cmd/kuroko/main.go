@@ -12,7 +12,6 @@ import (
 	"github.com/nagayon-935/kuroko/internal/console"
 	"github.com/nagayon-935/kuroko/internal/launcher"
 	"github.com/nagayon-935/kuroko/internal/session"
-	"github.com/nagayon-935/kuroko/internal/viewer"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=v1.2.3"
@@ -150,32 +149,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	case "view":
-		viewArgs, following := splitFollowFlag(rest[1:])
-		if following {
-			if _, _, hasLine, _ := splitLineFlag(viewArgs); hasLine {
-				return fail("view error: --line cannot be combined with --follow")
-			}
-			if err := runFollow(viewArgs, logDir, stdout); err != nil {
-				return fail("view error: %v", err)
-			}
-			return 0
-		}
-		viewArgs, line, hasLine, err := splitLineFlag(viewArgs)
-		if err != nil {
-			return fail("view error: %v", err)
-		}
-		path, err := resolveLogArgument(viewArgs, logDir)
-		if err != nil {
-			return fail("view error: %v", err)
-		}
-		if hasLine {
-			if err := openAtLine(path, line); err != nil {
+		if inViewer, err := runView(rest[1:], logDir, stdout); err != nil {
+			if inViewer {
 				return fail("viewer error: %v", err)
 			}
-			return 0
-		}
-		if err := viewer.Run(path); err != nil {
-			return fail("viewer error: %v", err)
+			return fail("view error: %v", err)
 		}
 		return 0
 	case "grep":

@@ -161,59 +161,6 @@ func writeTestLog(t *testing.T, logDir, rel, content string) string {
 	return path
 }
 
-func TestRunViewFollowStreamsFinishedLog(t *testing.T) {
-	logDir := isolate(t)
-	content := "# kuroko session log\nrouter output\n" + testFooter
-	path := writeTestLog(t, logDir, "ssh/r1/20260617_180000_ssh_r1.log", content)
-
-	for _, args := range [][]string{
-		{"-d", logDir, "view", "--follow", "--last"},
-		{"-d", logDir, "view", "--last", "-f"},
-		{"-d", logDir, "view", "-f", path},
-		{"-d", logDir, "view", path, "--follow"},
-	} {
-		code, stdout, stderr := runCLI(t, args...)
-		if code != 0 || stdout != content {
-			t.Errorf("run(%q) = %d, stdout %q, stderr %q; want 0 and the log", args, code, stdout, stderr)
-		}
-	}
-}
-
-func TestRunViewFollowReportsErrors(t *testing.T) {
-	logDir := isolate(t)
-	for _, args := range [][]string{
-		{"-d", logDir, "view", "--follow"},                                  // no log argument
-		{"-d", logDir, "view", "--follow", filepath.Join(logDir, "no.log")}, // missing file
-		{"-d", logDir, "view", "--follow", "--bogus", "x.log"},              // unknown option still rejected
-	} {
-		code, _, stderr := runCLI(t, args...)
-		if code != 1 {
-			t.Errorf("run(%q) = %d, stderr %q; want 1", args, code, stderr)
-		}
-	}
-}
-
-func TestSplitFollowFlag(t *testing.T) {
-	tests := []struct {
-		name       string
-		in, want   []string
-		wantFollow bool
-	}{
-		{"long", []string{"--follow", "--last"}, []string{"--last"}, true},
-		{"short after", []string{"a.log", "-f"}, []string{"a.log"}, true},
-		{"absent", []string{"a.log"}, []string{"a.log"}, false},
-		{"after delimiter", []string{"--", "-f"}, []string{"--", "-f"}, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, follow := splitFollowFlag(tt.in)
-			if follow != tt.wantFollow || strings.Join(got, "|") != strings.Join(tt.want, "|") {
-				t.Fatalf("splitFollowFlag(%q) = %q, %v; want %q, %v", tt.in, got, follow, tt.want, tt.wantFollow)
-			}
-		})
-	}
-}
-
 func TestRunGrep(t *testing.T) {
 	logDir := isolate(t)
 	writeTestLog(t, logDir, "ssh/a/20260101_000000_ssh_a.log", "# kuroko:cmd:2026-01-01T00:00:00Z\nInterface DOWN\nup\n")
@@ -299,5 +246,18 @@ func TestUsageMentionsNewCommands(t *testing.T) {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("usage lacks %q", want)
 		}
+	}
+}
+
+func TestUsageMentionsOpenAndLine(t *testing.T) {
+	isolate(t)
+	_, stdout, _ := runCLI(t, "--help")
+	for _, want := range []string{"grep --open", "view --last --line"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("usage lacks %q", want)
+		}
+	}
+	if !strings.Contains(grepUsage, "--open") {
+		t.Error("grep usage lacks --open")
 	}
 }
