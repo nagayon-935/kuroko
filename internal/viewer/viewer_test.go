@@ -384,12 +384,12 @@ func TestViewerScrollAndFocus(t *testing.T) {
 
 func TestViewerOutputSearch(t *testing.T) {
 	v := &Viewer{
-		currentOutputLines: []string{
+		currentOutputLines: byteLines(
 			"hello world",
 			"test message",
 			"HELLO anti-gravity",
 			"some other output",
-		},
+		),
 	}
 
 	v.outputQuery = "hello"
@@ -484,7 +484,7 @@ func TestHighlightQueryCaseFoldingByteLengthMismatch(t *testing.T) {
 }
 
 func TestScrollToLineBranches(t *testing.T) {
-	lines := make([]string, 100)
+	lines := make([][]byte, 100)
 	v := &Viewer{currentOutputLines: lines}
 	bodyHeight := 20
 
@@ -528,7 +528,7 @@ func TestScrollToLineBranches(t *testing.T) {
 
 func TestUpdateMatchesNoMatch(t *testing.T) {
 	v := &Viewer{
-		currentOutputLines: []string{"hello", "world"},
+		currentOutputLines: byteLines("hello", "world"),
 		activeMatch:        0,
 	}
 	// Non-empty query that matches nothing → activeMatch = -1

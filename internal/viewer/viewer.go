@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"unicode"
 
@@ -37,8 +38,10 @@ const (
 )
 
 type Viewer struct {
-	statusMessage      string
-	logPath            string
+	statusMessage string
+	logPath       string
+	// logData is the whole log. It must never be mutated after loadSession:
+	// currentOutputLines are zero-copy sub-slices that alias it.
 	logData            []byte
 	allCmds            []CommandMetadata
 	filteredIdx        []int // Indices into allCmds matching current search
@@ -54,7 +57,7 @@ type Viewer struct {
 	activePane         Pane
 	outputScroll       int
 	timelineScroll     int
-	currentOutputLines []string
+	currentOutputLines [][]byte // sub-slices of logData (read-only)
 }
 
 func Run(logPath string) error {
@@ -81,7 +84,7 @@ func loadSession(logPath string) (*Viewer, error) {
 		return nil, fmt.Errorf("opening log file: %w", err)
 	}
 	defer r.Close()
-	logData, err := io.ReadAll(r)
+	logData, err := readLog(r, logPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading log data: %w", err)
 	}
@@ -98,6 +101,63 @@ func loadSession(logPath string) (*Viewer, error) {
 	return v, nil
 }
 
+// readLog reads the whole log. Uncompressed logs are read into a buffer
+// preallocated from the file size, avoiding the doubling growth (and the
+// transient ~2x memory) of io.ReadAll. If the file grows while reading,
+// bytes.Buffer simply grows; if it shrinks, the shorter data is returned.
+// Compressed logs (decided the same way as logstore.Open) have an unknown
+// decompressed size and keep using io.ReadAll.
+func readLog(r io.Reader, logPath string) ([]byte, error) {
+	if strings.HasSuffix(logPath, ".gz") {
+		return io.ReadAll(r)
+	}
+	var buf bytes.Buffer
+	if info, err := os.Stat(logPath); err == nil && info.Size() > 0 {
+		buf.Grow(int(info.Size()) + bytes.MinRead)
+	}
+	if _, err := buf.ReadFrom(r); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// outputLinePrefix marks metadata lines that are hidden from the output pane.
+var outputLinePrefix = []byte("# kuroko:cmd:")
+
+// splitOutputLines splits data on LF and drops lines starting with the
+// metadata prefix, returning sub-slices of data (no copy).
+//
+// It is equivalent to strings.Split(string(filtered), "\n") where filtered is
+// writeFiltered's output: that function emits the retained lines joined by LF
+// (the separator is written lazily before each retained line; an input that
+// ends in LF yields a final empty retained line; a fragment longer than the
+// bufio buffer is a continuation of the same line, and the prefix test is made
+// on the first fragment, which always holds the whole 13-byte prefix). Splitting
+// the join of k retained lines yields exactly those k lines, except k == 0
+// where the empty output splits into a single empty line.
+func splitOutputLines(data []byte) [][]byte {
+	lines := make([][]byte, 0, bytes.Count(data, []byte{'\n'})+1)
+	for pos := 0; ; {
+		rest := data[pos:]
+		nl := bytes.IndexByte(rest, '\n')
+		line := rest
+		if nl >= 0 {
+			line = rest[:nl]
+		}
+		if !bytes.HasPrefix(line, outputLinePrefix) {
+			lines = append(lines, line)
+		}
+		if nl < 0 {
+			break
+		}
+		pos += nl + 1
+	}
+	if len(lines) == 0 {
+		lines = append(lines, data[:0])
+	}
+	return lines
+}
+
 func (v *Viewer) updateOutput() {
 	v.currentOutputLines = nil
 	v.matchLines = nil
@@ -108,9 +168,10 @@ func (v *Viewer) updateOutput() {
 		return
 	}
 
-	text, err := v.selectionText()
-	if err == nil {
-		v.currentOutputLines = strings.Split(string(text), "\n")
+	if v.selected >= 0 && v.selected < len(v.filteredIdx) {
+		if data, err := v.commandRange(v.filteredIdx[v.selected]); err == nil {
+			v.currentOutputLines = splitOutputLines(data)
+		}
 	}
 
 	v.updateMatches()
@@ -122,8 +183,9 @@ func (v *Viewer) updateMatches() {
 		return
 	}
 	query := strings.ToLower(v.outputQuery)
+	asciiQuery := isASCII(v.outputQuery)
 	for i, line := range v.currentOutputLines {
-		if strings.Contains(strings.ToLower(line), query) {
+		if lineMatches(line, query, asciiQuery) {
 			v.matchLines = append(v.matchLines, i)
 		}
 	}
@@ -132,6 +194,60 @@ func (v *Viewer) updateMatches() {
 	} else {
 		v.activeMatch = -1
 	}
+}
+
+func isASCII[T string | []byte](s T) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+// lineMatches reports strings.Contains(strings.ToLower(line), lowerQuery)
+// without allocating when both line and the original query are pure ASCII
+// (ASCII case folding then equals ToLower). Otherwise it falls back to the
+// exact ToLower comparison, since ToLower can map non-ASCII runes (e.g. U+212A,
+// U+0130) to ASCII ones.
+func lineMatches(line []byte, lowerQuery string, asciiQuery bool) bool {
+	if asciiQuery && isASCII(line) {
+		return containsFoldASCII(line, lowerQuery)
+	}
+	return strings.Contains(strings.ToLower(string(line)), lowerQuery)
+}
+
+// containsFoldASCII reports whether ASCII-lowercased line contains lowerQuery,
+// which must already be ASCII-lowercase.
+func containsFoldASCII(line []byte, lowerQuery string) bool {
+	n := len(lowerQuery)
+	if n == 0 {
+		return true
+	}
+	first := lowerQuery[0]
+	for i := 0; i+n <= len(line); i++ {
+		c := line[i]
+		if 'A' <= c && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if c != first {
+			continue
+		}
+		j := 1
+		for ; j < n; j++ {
+			d := line[i+j]
+			if 'A' <= d && d <= 'Z' {
+				d += 'a' - 'A'
+			}
+			if d != lowerQuery[j] {
+				break
+			}
+		}
+		if j == n {
+			return true
+		}
+	}
+	return false
 }
 
 // bodyHeight returns the number of rows available for the timeline/output
@@ -212,18 +328,20 @@ func runesEqualFold(a, b []rune) bool {
 
 func (v *Viewer) parseMetadata() {
 	var cmds []CommandMetadata
-	var currentOffset int64 = 0
+	data := v.logData
 
-	// Split by newline to scan line by line
-	lines := bytes.Split(v.logData, []byte("\n"))
-	for i, line := range lines {
-		lineLen := int64(len(line)) + 1 // +1 for the newline character
+	// Scan line by line (LF-separated, including a final line without LF)
+	// without materializing the lines; only metadata lines are converted.
+	for pos := 0; ; {
+		rest := data[pos:]
+		nl := bytes.IndexByte(rest, '\n')
+		line := rest
+		if nl >= 0 {
+			line = rest[:nl]
+		}
 
-		lineStr := strings.TrimSuffix(string(line), "\r")
-
-		prefix := "# kuroko:cmd:"
-		if strings.HasPrefix(lineStr, prefix) {
-			payload := lineStr[len(prefix):]
+		if bytes.HasPrefix(line, outputLinePrefix) {
+			payload := string(bytes.TrimSuffix(line, []byte{'\r'})[len(outputLinePrefix):])
 
 			var timestamp string
 			var command string
@@ -234,13 +352,18 @@ func (v *Viewer) parseMetadata() {
 				command = payload[idx+1:]
 			} else {
 				timestamp = payload
-				// Extract command from the next line (prompt + command)
-				if i+1 < len(lines) {
-					_, cmdBytes, _ := logger.SplitPromptInfo(lines[i+1])
+				// Extract command from the next line (prompt + command). The
+				// next line is intentionally not CR-trimmed here.
+				if nl >= 0 {
+					next := data[pos+nl+1:]
+					if e := bytes.IndexByte(next, '\n'); e >= 0 {
+						next = next[:e]
+					}
+					_, cmdBytes, _ := logger.SplitPromptInfo(next)
 					if len(cmdBytes) > 0 {
 						command = string(cmdBytes)
 					} else {
-						command = string(lines[i+1])
+						command = string(next)
 					}
 				}
 			}
@@ -250,10 +373,13 @@ func (v *Viewer) parseMetadata() {
 			cmds = append(cmds, CommandMetadata{
 				Timestamp: timestamp,
 				Command:   command,
-				Offset:    currentOffset,
+				Offset:    int64(pos),
 			})
 		}
-		currentOffset += lineLen
+		if nl < 0 {
+			break
+		}
+		pos += nl + 1
 	}
 	v.allCmds = cmds
 }

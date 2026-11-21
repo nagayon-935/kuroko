@@ -108,7 +108,7 @@ func (v *Viewer) outputCell(r, width int) string {
 	if lineIdx >= len(v.currentOutputLines) {
 		return strings.Repeat(" ", width)
 	}
-	text := textwidth.Fit(tui.Plain(strings.ReplaceAll(v.currentOutputLines[lineIdx], "\r", "")), width)
+	text := textwidth.Fit(tui.Plain(strings.ReplaceAll(string(v.currentOutputLines[lineIdx]), "\r", "")), width)
 
 	for idx, ml := range v.matchLines {
 		if ml == lineIdx {
