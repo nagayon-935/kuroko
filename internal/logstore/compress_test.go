@@ -191,3 +191,62 @@ func TestCompressFileWithoutFooterLeavesCommentEmpty(t *testing.T) {
 		t.Errorf("source should be removed, stat err = %v", err)
 	}
 }
+
+func TestCompressFileErrorBranches(t *testing.T) {
+	t.Run("missing source", func(t *testing.T) {
+		dir := t.TempDir()
+		src := filepath.Join(dir, "missing.log")
+
+		got, err := CompressFile(src)
+
+		if err == nil || got != "" {
+			t.Fatalf("CompressFile = %q, %v; want empty path and error", got, err)
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("error = %v, want ErrNotExist", err)
+		}
+	})
+	t.Run("temp file cannot be created in read-only directory", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("permission checks do not apply to root")
+		}
+		dir := t.TempDir()
+		src := filepath.Join(dir, "a.log")
+		if err := os.WriteFile(src, []byte("data\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(dir, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+		got, err := CompressFile(src)
+
+		if err == nil || got != "" {
+			t.Fatalf("CompressFile = %q, %v; want error", got, err)
+		}
+		if _, statErr := os.Stat(src); statErr != nil {
+			t.Errorf("source must be kept on failure: %v", statErr)
+		}
+	})
+	t.Run("source is a directory", func(t *testing.T) {
+		dir := t.TempDir()
+		src := filepath.Join(dir, "sub")
+		if err := os.Mkdir(src, 0o700); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := CompressFile(src)
+
+		if err == nil {
+			t.Fatal("expected error compressing a directory")
+		}
+		if _, statErr := os.Stat(src + ".gz"); !os.IsNotExist(statErr) {
+			t.Errorf("no archive should be published, stat err = %v", statErr)
+		}
+		entries, _ := os.ReadDir(dir)
+		if len(entries) != 1 {
+			t.Errorf("temporary files left behind: %v", entries)
+		}
+	})
+}

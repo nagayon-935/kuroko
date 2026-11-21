@@ -151,3 +151,99 @@ func TestLatestLogFileSameSecondUsesModificationTime(t *testing.T) {
 		t.Fatalf("latest=(%s,%v); want %s", got, err, newer)
 	}
 }
+
+func TestSummaryDurationEdgeCases(t *testing.T) {
+	base := time.Date(2026, 6, 17, 18, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name string
+		s    Summary
+		want time.Duration
+	}{
+		{"zero summary", Summary{}, 0},
+		{"missing start", Summary{Ended: base}, 0},
+		{"missing end", Summary{Started: base}, 0},
+		{"end before start", Summary{Started: base, Ended: base.Add(-time.Second)}, 0},
+		{"equal start and end", Summary{Started: base, Ended: base}, 0},
+		{"normal span", Summary{Started: base, Ended: base.Add(90 * time.Second)}, 90 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.s.Duration(); got != tt.want {
+				t.Errorf("Duration() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFooterOffsetEdgeCases(t *testing.T) {
+	rule := strings.Repeat("-", 68)
+	body := "output\n"
+	footer := "\n# " + rule + "\n# Ended   : 2026-06-17T18:00:05Z\n# Exit    : 0\n"
+	tests := []struct {
+		name string
+		data string
+		want int // -1 means len(data)
+	}{
+		{"empty", "", -1},
+		{"no footer", body, -1},
+		{"complete footer", body + footer, len(body)},
+		{"complete footer without trailing newline", body + strings.TrimSuffix(footer, "\n"), len(body)},
+		{"crlf footer is not recognized", strings.ReplaceAll(body+footer, "\n", "\r\n"), -1},
+		{"marker only", body + "\n# " + rule + "\n# Ended   : ", -1},
+		{"missing exit line", body + "\n# " + rule + "\n# Ended   : 2026-06-17T18:00:05Z\n", -1},
+		{"extra trailing line", body + footer + "trailing\n", -1},
+		{"wrong exit label", body + "\n# " + rule + "\n# Ended   : 2026-06-17T18:00:05Z\n# Status  : 0\n", -1},
+		{"invalid ended time", body + "\n# " + rule + "\n# Ended   : yesterday\n# Exit    : 0\n", -1},
+		{"non numeric exit", body + "\n# " + rule + "\n# Ended   : 2026-06-17T18:00:05Z\n# Exit    : abc\n", -1},
+		{"negative exit accepted", body + "\n# " + rule + "\n# Ended   : 2026-06-17T18:00:05Z\n# Exit    : -1\n", len(body)},
+		{"last footer wins over earlier lookalike", body + footer + "more\n" + footer, len(body) + len(footer) + len("more\n")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			want := tt.want
+			if want == -1 {
+				want = len(tt.data)
+			}
+			if got := FooterOffset([]byte(tt.data)); got != want {
+				t.Errorf("FooterOffset = %d, want %d", got, want)
+			}
+		})
+	}
+}
+
+func TestTailWindowKeepsOnlyLastMetadataWindowBytes(t *testing.T) {
+	tests := []struct {
+		name   string
+		writes []string
+		want   string
+	}{
+		{"small write is appended", []string{"abc", "def"}, "abcdef"},
+		{"single oversized write keeps tail", []string{strings.Repeat("x", metadataWindow) + "TAIL"}, strings.Repeat("x", metadataWindow-4) + "TAIL"},
+		{"exact window write replaces content", []string{"old", strings.Repeat("y", metadataWindow)}, strings.Repeat("y", metadataWindow)},
+		{"overflowing append drops oldest bytes", []string{strings.Repeat("a", metadataWindow-2), "bcde"}, strings.Repeat("a", metadataWindow-4) + "bcde"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := &tailWindow{}
+			for _, s := range tt.writes {
+				n, err := w.Write([]byte(s))
+				if err != nil || n != len(s) {
+					t.Fatalf("Write = %d, %v; want %d, nil", n, err, len(s))
+				}
+			}
+			if string(w.data) != tt.want {
+				t.Errorf("window = %d bytes %q..., want %d bytes", len(w.data), truncForLog(w.data), len(tt.want))
+			}
+			if len(w.data) > metadataWindow {
+				t.Errorf("window exceeds metadataWindow: %d", len(w.data))
+			}
+		})
+	}
+}
+
+func truncForLog(b []byte) string {
+	if len(b) > 16 {
+		return string(b[len(b)-16:])
+	}
+	return string(b)
+}
