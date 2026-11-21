@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"regexp"
-	"strings"
 )
 
 var (
@@ -96,12 +95,10 @@ func looksLikePEMBody(line []byte) bool {
 // redact returns line with any credentials it contains replaced by
 // placeholders.
 func (r *redactor) redact(line []byte) []byte {
-	lineStr := string(line)
-
 	// Stateful PEM Block redaction
-	if beginIdx := strings.Index(lineStr, "-----BEGIN"); beginIdx >= 0 && strings.Contains(lineStr[beginIdx:], "PRIVATE KEY-----") {
-		rest := lineStr[beginIdx:]
-		if endIdx := strings.Index(rest, "-----END"); endIdx >= 0 && strings.Contains(rest[endIdx:], "PRIVATE KEY-----") {
+	if beginIdx := bytes.Index(line, []byte("-----BEGIN")); beginIdx >= 0 && bytes.Contains(line[beginIdx:], []byte("PRIVATE KEY-----")) {
+		rest := line[beginIdx:]
+		if endIdx := bytes.Index(rest, []byte("-----END")); endIdx >= 0 && bytes.Contains(rest[endIdx:], []byte("PRIVATE KEY-----")) {
 			r.inPEMBlock = false
 			return []byte("[PEM PRIVATE KEY BLOCK ENDED - REDACTED]")
 		}
@@ -109,7 +106,7 @@ func (r *redactor) redact(line []byte) []byte {
 		return []byte("[PEM PRIVATE KEY BLOCK STARTED - REDACTED]")
 	}
 	if r.inPEMBlock {
-		if strings.Contains(lineStr, "-----END") && strings.Contains(lineStr, "PRIVATE KEY-----") {
+		if bytes.Contains(line, []byte("-----END")) && bytes.Contains(line, []byte("PRIVATE KEY-----")) {
 			r.inPEMBlock = false
 			return []byte("[PEM PRIVATE KEY BLOCK ENDED - REDACTED]")
 		}
@@ -121,13 +118,50 @@ func (r *redactor) redact(line []byte) []byte {
 		r.inPEMBlock = false
 	}
 
-	line = awsAccessKeyPattern.ReplaceAll(line, []byte("[AWS_ACCESS_KEY_REDACTED]"))
-	line = redactSubmatch(line, awsSecretKeyPattern, 2, []byte("[AWS_SECRET_KEY_REDACTED]"))
-	line = redactSubmatch(line, bearerTokenPattern, 1, []byte("[TOKEN_REDACTED]"))
-	line = redactSubmatch(line, sqlPasswordPattern, 1, []byte("[PASSWORD_REDACTED]"))
-	line = redactSubmatch(line, nwKeywordSecretPattern, 1, []byte("[SECRET_REDACTED]"))
-	line = redactSubmatch(line, nwBareSecretPattern, 1, []byte("[SECRET_REDACTED]"))
+	// Each rule is gated on the keywords it needs. Placeholders inserted by an
+	// earlier rule (e.g. [AWS_SECRET_KEY_REDACTED]) are visible to later
+	// rules, so the keyword set is rescanned whenever a rule changes the line.
+	kw := scanRedactKeywords(line)
+	for _, rule := range redactRules {
+		if kw&rule.gate == 0 {
+			continue
+		}
+		next := rule.apply(line)
+		if !bytes.Equal(next, line) {
+			kw = scanRedactKeywords(next)
+		}
+		line = next
+	}
 	return line
+}
+
+// redactRule is one regex pass with the keywords that every match of it must
+// contain (any one of gate's bits).
+type redactRule struct {
+	gate  uint8
+	apply func(line []byte) []byte
+}
+
+// redactRules run in order; the order is part of the output contract.
+var redactRules = []redactRule{
+	{kwAKIA, func(l []byte) []byte {
+		return awsAccessKeyPattern.ReplaceAll(l, []byte("[AWS_ACCESS_KEY_REDACTED]"))
+	}},
+	{kwSecret, func(l []byte) []byte {
+		return redactSubmatch(l, awsSecretKeyPattern, 2, []byte("[AWS_SECRET_KEY_REDACTED]"))
+	}},
+	{kwBearer, func(l []byte) []byte {
+		return redactSubmatch(l, bearerTokenPattern, 1, []byte("[TOKEN_REDACTED]"))
+	}},
+	{kwIdentified, func(l []byte) []byte {
+		return redactSubmatch(l, sqlPasswordPattern, 1, []byte("[PASSWORD_REDACTED]"))
+	}},
+	{kwSecret | kwPassword | kwKey | kwCommunity, func(l []byte) []byte {
+		return redactSubmatch(l, nwKeywordSecretPattern, 1, []byte("[SECRET_REDACTED]"))
+	}},
+	{kwSecret | kwPassword | kwKey, func(l []byte) []byte {
+		return redactSubmatch(l, nwBareSecretPattern, 1, []byte("[SECRET_REDACTED]"))
+	}},
 }
 
 // RedactText masks credentials in a whole log text, line by line, the same
