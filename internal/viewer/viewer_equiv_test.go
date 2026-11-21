@@ -78,7 +78,7 @@ func oldOutputLines(t testing.TB, data []byte) []string {
 	if err := writeFiltered(bytes.NewReader(data), &out); err != nil {
 		t.Fatalf("writeFiltered: %v", err)
 	}
-	return strings.Split(string(out.Bytes()), "\n")
+	return strings.Split(out.String(), "\n")
 }
 
 func oldMatches(lines []string, query string) []int {
