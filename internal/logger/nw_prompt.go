@@ -2,7 +2,6 @@ package logger
 
 import (
 	"path/filepath"
-	"regexp"
 	"strings"
 )
 
@@ -24,16 +23,59 @@ type PromptInfo struct {
 	Mode     string // config sub-mode, e.g. "config-if", "config-router"; empty for non-config
 }
 
-// nwPromptRe matches Cisco/Arista/NX-OS/Juniper-style prompts.
-// Groups: 1=hostname  2=(mode-parens)  3=mode  4=indicator(#/>)
+// matchNWPrompt is a linear-time scanner equivalent to the regex
 //
-// Anchored at start of line; no leading whitespace allowed (checked separately).
-// hostname: starts with letter or digit, may contain letters, digits, dots, dashes, underscores,
-// and a single @ (Juniper user@host form).
-var nwPromptRe = regexp.MustCompile(
-	`^([A-Za-z][A-Za-z0-9._@-]*)` + // hostname (must start with letter)
-		`(\(([A-Za-z0-9][A-Za-z0-9._-]*)\))?` + // optional (mode)
-		`([#>])`) // indicator — immediately after hostname or (mode)
+//	^([A-Za-z][A-Za-z0-9._@-]*)(\(([A-Za-z0-9][A-Za-z0-9._-]*)\))?([#>])
+//
+// (kept as nwPromptRe in nw_prompt_test.go and used as a test oracle).
+// It returns the same 10-element submatch index slice as
+// FindSubmatchIndex (unmatched optional groups are -1), or nil.
+//
+// Backtracking can never help: '(', ')', '#' and '>' belong to neither the
+// hostname nor the mode character class, so a shorter run is always followed
+// by a class byte that cannot satisfy the next element. Non-ASCII bytes are
+// in no class and simply end a run.
+func matchNWPrompt(line []byte) []int {
+	n := len(line)
+	if n == 0 || !isASCIILetter(line[0]) {
+		return nil
+	}
+	i := 1
+	for i < n && isHostByte(line[i]) {
+		i++
+	}
+	hostEnd := i
+	if i >= n {
+		return nil
+	}
+	if c := line[i]; c == '#' || c == '>' {
+		return []int{0, i + 1, 0, hostEnd, -1, -1, -1, -1, i, i + 1}
+	}
+	if line[i] != '(' {
+		return nil
+	}
+	modeStart := i + 1
+	if modeStart >= n || !isASCIIAlnum(line[modeStart]) {
+		return nil
+	}
+	j := modeStart + 1
+	for j < n && isModeByte(line[j]) {
+		j++
+	}
+	// need ')' then '#' or '>'
+	if j+1 >= n || line[j] != ')' {
+		return nil
+	}
+	if c := line[j+1]; c != '#' && c != '>' {
+		return nil
+	}
+	return []int{0, j + 2, 0, hostEnd, hostEnd, j + 1, modeStart, j, j + 1, j + 2}
+}
+
+func isASCIILetter(c byte) bool { return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' }
+func isASCIIAlnum(c byte) bool  { return isASCIILetter(c) || c >= '0' && c <= '9' }
+func isModeByte(c byte) bool    { return isASCIIAlnum(c) || c == '.' || c == '_' || c == '-' }
+func isHostByte(c byte) bool    { return isModeByte(c) || c == '@' }
 
 // SplitPromptInfo analyses line and returns:
 //   - prompt: the prompt prefix bytes (nil if not detected)
@@ -57,12 +99,10 @@ func SplitPromptInfo(line []byte) (prompt, cmd []byte, info PromptInfo) {
 	if len(line) == 0 || line[0] == ' ' || line[0] == '\t' || line[0] == '#' || line[0] == '!' {
 		return nil, nil, PromptInfo{}
 	}
-	// Skip kuroko metadata lines.
-	if strings.HasPrefix(string(line), "# kuroko:") {
-		return nil, nil, PromptInfo{}
-	}
+	// Note: "# kuroko:" metadata lines are already rejected above because
+	// they start with '#'.
 
-	m := nwPromptRe.FindSubmatchIndex(line)
+	m := matchNWPrompt(line)
 	if m == nil {
 		return nil, nil, PromptInfo{}
 	}
