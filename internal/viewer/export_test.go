@@ -43,7 +43,7 @@ func TestWholeSessionWithoutCommands(t *testing.T) {
 		if len(v.allCmds) != 1 || !v.allCmds[0].WholeSession {
 			t.Fatalf("missing whole session: %+v", v.allCmds)
 		}
-		if got := strings.Join(v.currentOutputLines, "\n"); got != text {
+		if got := outputText(v); got != text {
 			t.Fatalf("hidden output: %q; want %q", got, text)
 		}
 	}
@@ -56,7 +56,7 @@ func TestWholeSessionIncludesPreambleAndCommandSearch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(strings.Join(v.currentOutputLines, "\n"), "connected to router") {
+	if !strings.Contains(outputText(v), "connected to router") {
 		t.Fatal("connection preamble hidden")
 	}
 	v.searchQuery = "cat"
@@ -65,7 +65,7 @@ func TestWholeSessionIncludesPreambleAndCommandSearch(t *testing.T) {
 	if len(v.filteredIdx) != 1 || v.allCmds[v.filteredIdx[0]].Command != "cat file.txt" {
 		t.Fatalf("unexpected filter: %v", v.filteredIdx)
 	}
-	if strings.Contains(strings.Join(v.currentOutputLines, "\n"), "file.txt\n\nuser@") {
+	if strings.Contains(outputText(v), "file.txt\n\nuser@") {
 		t.Fatal("previous command leaked into output")
 	}
 	v.searchQuery = ""

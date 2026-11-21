@@ -30,11 +30,22 @@ func (v *Viewer) selectionText() ([]byte, error) {
 }
 
 func (v *Viewer) commandRange(idx int) ([]byte, error) {
+	start, end, err := v.rangeBounds(idx)
+	if err != nil {
+		return nil, err
+	}
+	return v.logData[start:end], nil
+}
+
+// rangeBounds returns the byte range of logData that command idx (0 = the
+// entire session) covers: from its metadata line to the next command or the
+// footer.
+func (v *Viewer) rangeBounds(idx int) (start, end int64, err error) {
 	if idx < 0 || idx >= len(v.allCmds) {
-		return nil, fmt.Errorf("invalid command selection")
+		return 0, 0, fmt.Errorf("invalid command selection")
 	}
 	cmd := v.allCmds[idx]
-	start, end := cmd.Offset, int64(len(v.logData))
+	start, end = cmd.Offset, int64(len(v.logData))
 	if cmd.WholeSession {
 		start = 0
 	} else {
@@ -44,9 +55,9 @@ func (v *Viewer) commandRange(idx int) ([]byte, error) {
 		}
 	}
 	if start < 0 || start > end || end > int64(len(v.logData)) {
-		return nil, fmt.Errorf("invalid command offsets")
+		return 0, 0, fmt.Errorf("invalid command offsets")
 	}
-	return v.logData[start:end], nil
+	return start, end, nil
 }
 
 // writeFiltered joins retained lines with LF. Delaying the separator until
