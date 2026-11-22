@@ -81,3 +81,12 @@ func TestRenderHelpers(t *testing.T) {
 		t.Errorf("MoveToRow = %q; want %q", got, want)
 	}
 }
+
+func TestMarkKeepsTheMarkAroundNestedHighlights(t *testing.T) {
+	got := Mark("ab\x1b[30;43mcd\x1b[0mef")
+
+	want := "\x1b[1;37;44mab\x1b[30;43mcd\x1b[0m\x1b[1;37;44mef\x1b[0m"
+	if got != want {
+		t.Fatalf("Mark() = %q; want %q", got, want)
+	}
+}

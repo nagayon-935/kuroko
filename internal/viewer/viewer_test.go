@@ -1,7 +1,9 @@
 package viewer
 
 import (
+	"bytes"
 	"compress/gzip"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
@@ -384,12 +386,12 @@ func TestViewerScrollAndFocus(t *testing.T) {
 
 func TestViewerOutputSearch(t *testing.T) {
 	v := &Viewer{
-		currentOutputLines: []string{
+		currentOutputLines: byteLines(
 			"hello world",
 			"test message",
 			"HELLO anti-gravity",
 			"some other output",
-		},
+		),
 	}
 
 	v.outputQuery = "hello"
@@ -484,7 +486,7 @@ func TestHighlightQueryCaseFoldingByteLengthMismatch(t *testing.T) {
 }
 
 func TestScrollToLineBranches(t *testing.T) {
-	lines := make([]string, 100)
+	lines := make([][]byte, 100)
 	v := &Viewer{currentOutputLines: lines}
 	bodyHeight := 20
 
@@ -528,7 +530,7 @@ func TestScrollToLineBranches(t *testing.T) {
 
 func TestUpdateMatchesNoMatch(t *testing.T) {
 	v := &Viewer{
-		currentOutputLines: []string{"hello", "world"},
+		currentOutputLines: byteLines("hello", "world"),
 		activeMatch:        0,
 	}
 	// Non-empty query that matches nothing → activeMatch = -1
@@ -665,4 +667,101 @@ func TestViewerAndSelectorSanitizeControlSequences(t *testing.T) {
 	if strings.Contains(sOut, "\x1b[2J") || strings.ContainsRune(sOut, '\u202e') {
 		t.Fatalf("selector emitted unsafe sequence: %q", sOut)
 	}
+}
+
+func gzipBytes(t *testing.T, parts ...string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	for _, p := range parts {
+		zw := gzip.NewWriter(&buf)
+		if _, err := zw.Write([]byte(p)); err != nil {
+			t.Fatal(err)
+		}
+		if err := zw.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return buf.Bytes()
+}
+
+func writeTemp(t *testing.T, name string, data []byte) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(p, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func withTrailer(data []byte, isize uint32) []byte {
+	out := append([]byte(nil), data...)
+	binary.LittleEndian.PutUint32(out[len(out)-4:], isize)
+	return out
+}
+
+func TestGzipSizeHint(t *testing.T) {
+	body := variedLog(500)
+	good := gzipBytes(t, body)
+	tests := []struct {
+		name string
+		data []byte
+		want int
+	}{
+		{"normal gzip", good, len(body)},
+		{"zero trailer", withTrailer(good, 0), 0},
+		{"trailer above max deflate ratio", withTrailer(good, uint32(maxDeflateRatio*len(good)+1)), 0},
+		{"trailer above 1GiB", withTrailer(good, 1<<30+1), 0},
+		{"shorter than 4 bytes", []byte{1, 2, 3}, 0},
+		{"empty file", nil, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := gzipSizeHint(writeTemp(t, "x.log.gz", tt.data)); got != tt.want {
+				t.Errorf("gzipSizeHint = %d; want %d", got, tt.want)
+			}
+		})
+	}
+	if got := gzipSizeHint(filepath.Join(t.TempDir(), "missing.gz")); got != 0 {
+		t.Errorf("gzipSizeHint(missing) = %d; want 0", got)
+	}
+}
+
+func TestReadLogGzip(t *testing.T) {
+	body := variedLog(500)
+	tests := []struct {
+		name string
+		data []byte
+		want string
+	}{
+		{"hinted", gzipBytes(t, body), body},
+		{"multi-member", gzipBytes(t, "first\n", "second\n"), "first\nsecond\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := writeTemp(t, "x.log.gz", tt.data)
+			f, err := os.Open(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close()
+			zr, err := gzip.NewReader(f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := readLog(zr, p)
+			if err != nil || string(got) != tt.want {
+				t.Errorf("readLog = %q, %v; want %q", got, err, tt.want)
+			}
+		})
+	}
+}
+
+// variedLog returns n distinct lines so the gzip ratio stays well under the
+// hint's maxDeflateRatio plausibility bound.
+func variedLog(n int) string {
+	var sb strings.Builder
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(&sb, "%d: interface Gi0/%d changed state to %d\n", i*7919%1000003, i%48, i*31%97)
+	}
+	return sb.String()
 }

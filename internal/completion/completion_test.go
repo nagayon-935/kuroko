@@ -39,7 +39,7 @@ func TestCandidates(t *testing.T) {
 		{
 			name: "view lists log files from configured log dir",
 			ctx:  []string{"view"},
-			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log", "--last", "--follow", "-f"},
+			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log", "--last", "--follow", "-f", "--line"},
 		},
 		{
 			name: "config offers check",
@@ -73,17 +73,17 @@ func TestCandidates(t *testing.T) {
 		{
 			name: "--log-dir=DIR single token redirects view completion",
 			ctx:  []string{"--log-dir=" + otherDir, "view"},
-			want: []string{"20260101_010000_bash.log", "--last", "--follow", "-f"},
+			want: []string{"20260101_010000_bash.log", "--last", "--follow", "-f", "--line"},
 		},
 		{
 			name: "--log-dir = DIR split by COMP_WORDBREAKS redirects view completion",
 			ctx:  []string{"--log-dir", "=", otherDir, "view"},
-			want: []string{"20260101_010000_bash.log", "--last", "--follow", "-f"},
+			want: []string{"20260101_010000_bash.log", "--last", "--follow", "-f", "--line"},
 		},
 		{
 			name: "single-dash -log-dir form redirects view completion",
 			ctx:  []string{"-log-dir", otherDir, "view"},
-			want: []string{"20260101_010000_bash.log", "--last", "--follow", "-f"},
+			want: []string{"20260101_010000_bash.log", "--last", "--follow", "-f", "--line"},
 		},
 		{
 			name: "help flag short-circuits: main prints usage and exits",
@@ -98,27 +98,27 @@ func TestCandidates(t *testing.T) {
 		{
 			name: "help flag explicitly set false does not short-circuit",
 			ctx:  []string{"--help=false", "view"},
-			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log", "--last", "--follow", "-f"},
+			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log", "--last", "--follow", "-f", "--line"},
 		},
 		{
 			name: "empty log-dir value falls back to configured dir (like config.Load)",
 			ctx:  []string{"--log-dir=", "view"},
-			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log", "--last", "--follow", "-f"},
+			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log", "--last", "--follow", "-f", "--line"},
 		},
 		{
 			name: "last log-dir wins, and an empty last value means configured dir",
 			ctx:  []string{"-d", otherDir, "-d=", "view"},
-			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log", "--last", "--follow", "-f"},
+			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log", "--last", "--follow", "-f", "--line"},
 		},
 		{
 			name: "last non-empty log-dir wins",
 			ctx:  []string{"-d", "/nonexistent", "-d", otherDir, "view"},
-			want: []string{"20260101_010000_bash.log", "--last", "--follow", "-f"},
+			want: []string{"20260101_010000_bash.log", "--last", "--follow", "-f", "--line"},
 		},
 		{
 			name: "double dash terminates flags",
 			ctx:  []string{"--", "view"},
-			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log", "--last", "--follow", "-f"},
+			want: []string{"20260101_000000_bash.log.gz", "20260617_180000_ssh_edgeSW03.log", "--last", "--follow", "-f", "--line"},
 		},
 		{
 			name: "completion subcommand lists supported shells",
@@ -128,7 +128,7 @@ func TestCandidates(t *testing.T) {
 		{
 			name: "log-dir override redirects view completion",
 			ctx:  []string{"-d", otherDir, "view"},
-			want: []string{"20260101_010000_bash.log", "--last", "--follow", "-f"},
+			want: []string{"20260101_010000_bash.log", "--last", "--follow", "-f", "--line"},
 		},
 		{
 			name: "unknown leading word (wrapped command) yields no candidates",
@@ -214,20 +214,28 @@ func TestGrepAndViewFollowCandidates(t *testing.T) {
 		ctx  []string
 		want []string
 	}{
-		{"grep offers its flags", []string{"grep"}, []string{"-i", "-l"}},
-		{"grep drops a flag already given", []string{"grep", "-i"}, []string{"-l"}},
+		{"grep offers its flags", []string{"grep"}, []string{"-i", "-l", "--open"}},
+		{"grep drops a flag already given", []string{"grep", "-i"}, []string{"-l", "--open"}},
 		{"grep offers nothing once both flags are given", []string{"grep", "-i", "-l"}, nil},
 		{"grep pattern is free text: nothing after it", []string{"grep", "error"}, nil},
 		{"grep flags after the pattern are not offered", []string{"grep", "-i", "error"}, nil},
 		{"grep after -- takes a pattern", []string{"grep", "--"}, nil},
-		{"grep honours global log-dir flags before it", []string{"-d", dir, "grep"}, []string{"-i", "-l"}},
-		{"view offers --follow with --last and files", []string{"view"}, []string{"session.log", "--last", "--follow", "-f"}},
+		{"grep honours global log-dir flags before it", []string{"-d", dir, "grep"}, []string{"-i", "-l", "--open"}},
+		{"view offers --follow with --last and files", []string{"view"}, []string{"session.log", "--last", "--follow", "-f", "--line"}},
 		{"after --follow files and --last are offered", []string{"view", "--follow"}, []string{"session.log", "--last"}},
 		{"after -f files and --last are offered", []string{"view", "-f"}, []string{"session.log", "--last"}},
-		{"after --last only --follow remains", []string{"view", "--last"}, []string{"--follow", "-f"}},
+		{"after --last only --follow remains", []string{"view", "--last"}, []string{"--follow", "-f", "--line"}},
 		{"after --follow --last nothing remains", []string{"view", "--follow", "--last"}, nil},
 		{"after --last --follow nothing remains", []string{"view", "--last", "-f"}, nil},
 		{"after --follow and a file nothing remains", []string{"view", "--follow", "session.log"}, nil},
+		{"grep --open excludes -l", []string{"grep", "--open"}, []string{"-i"}},
+		{"grep -l excludes --open", []string{"grep", "-l"}, []string{"-i"}},
+		{"grep --open -i nothing remains", []string{"grep", "--open", "-i"}, nil},
+		{"after --line N files and --last are offered", []string{"view", "--line", "12"}, []string{"session.log", "--last"}},
+		{"after --line=N files and --last are offered", []string{"view", "--line=12"}, []string{"session.log", "--last"}},
+		{"the line number itself is free text", []string{"view", "--line"}, nil},
+		{"after --last --line N nothing remains", []string{"view", "--last", "--line", "3"}, nil},
+		{"after --line N a file ends the flags", []string{"view", "--line", "3", "session.log"}, nil},
 		{"unknown view flag stops completion", []string{"view", "--bogus"}, nil},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -277,7 +285,7 @@ func TestNestedStorageCompletion(t *testing.T) {
 		ctx  []string
 		want []string
 	}{
-		{[]string{"view"}, []string{relative, "--last", "--follow", "-f"}},
+		{[]string{"view"}, []string{relative, "--last", "--follow", "-f", "--line"}},
 		{[]string{"logs"}, []string{"--info"}},
 		{[]string{"logs", "--info"}, nil},
 		{[]string{"migrate"}, []string{"--from"}},
