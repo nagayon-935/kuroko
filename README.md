@@ -98,6 +98,17 @@ kuroko screen /dev/ttyUSB0 115200
 
 ログの既定の保存先は `~/.kuroko/logs/` です。セッションごとに場所を変える場合は `kuroko -d ~/work/logs ssh user@hostname` を使います。
 
+### エイリアスで普段の接続を記録する
+
+zsh なら `~/.zshrc`、bash なら `~/.bashrc` に使いたいエイリアスを追加し、端末を開き直します。
+
+```bash
+alias ssh='kuroko ssh'
+alias screen='kuroko screen'
+```
+
+以降は普段どおり `ssh user@hostname` や `screen /dev/ttyUSB0 115200` と入力するだけで、kuroko がセッションを記録します。
+
 ## ログの閲覧と活用
 
 | コマンド | 動作 |
