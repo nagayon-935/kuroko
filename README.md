@@ -18,9 +18,19 @@
 
 ## インストール
 
-### Releases からインストール（推奨）
+Go を使える環境では `go install` が手軽です。Go を入れていない macOS / Linux では、GitHub Releases のビルド済みバイナリを使えます。
 
-ビルド済みバイナリを使う場合、Go は不要です。`uname -s` と `uname -m` で環境を確認し、同じリリースから対応する `.tar.gz` と `checksums.txt` をダウンロードしてください。[GitHub Releases](https://github.com/nagayon-935/kuroko/releases/latest)
+### Go でインストール
+
+ビルドには Go 1.26 以上が必要です。次のコマンドで `~/.local/bin` にインストールできます。更新するときも同じコマンドを使います。
+
+```bash
+GOBIN="$HOME/.local/bin" go install github.com/nagayon-935/kuroko/cmd/kuroko@latest
+```
+
+### ビルド済みバイナリでインストール
+
+`uname -s` と `uname -m` で環境を確認し、同じリリースから対応する `.tar.gz` と `checksums.txt` をダウンロードしてください。[GitHub Releases](https://github.com/nagayon-935/kuroko/releases/latest)
 
 | OS | `x86_64` | `arm64` / `aarch64` |
 |----|----------|---------------------|
@@ -46,14 +56,6 @@
   mkdir -p "$HOME/.local/bin"
   install -m 755 "$temp_dir/kuroko" "$HOME/.local/bin/kuroko"
 )
-```
-
-### Go でインストール
-
-Go 1.26 以上があれば、`go install` でも `~/.local/bin` にインストールできます。
-
-```bash
-GOBIN="$HOME/.local/bin" go install github.com/nagayon-935/kuroko/cmd/kuroko@latest
 ```
 
 ### PATH の設定と動作確認
