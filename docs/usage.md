@@ -162,10 +162,4 @@ mkdir -p ~/.config/fish/completions
 kuroko completion fish > ~/.config/fish/completions/kuroko.fish
 ```
 
-ソースからビルドするには Go 1.26 以上、Git、Make が必要です。`make install` は `~/.local/bin/kuroko` に配置します。
-
-```bash
-git clone https://github.com/nagayon-935/kuroko.git
-cd kuroko
-make install
-```
+ソースを取得してビルドする手順は README を参照してください。[ソースからビルドしてインストール](../README.md#ソースからビルドしてインストール)

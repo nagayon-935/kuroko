@@ -22,7 +22,7 @@ Go を使える環境では `go install` が手軽です。Go を入れていな
 
 ### Go でインストール
 
-ビルドには Go 1.26 以上が必要です。次のコマンドで `~/.local/bin` にインストールできます。更新するときも同じコマンドを使います。
+ビルドには Go 1.26 以上が必要です。インストールと更新には同じコマンドを使います。
 
 ```bash
 go install github.com/nagayon-935/kuroko/cmd/kuroko@latest
@@ -30,37 +30,47 @@ go install github.com/nagayon-935/kuroko/cmd/kuroko@latest
 
 ### ビルド済みバイナリでインストール
 
-`uname -s` と `uname -m` で環境を確認し、同じリリースから対応する `.tar.gz` と `checksums.txt` をダウンロードしてください。[GitHub Releases](https://github.com/nagayon-935/kuroko/releases/latest)
+`uname -s` と `uname -m` で環境を確認し、対応するファイルを選びます。
 
 | OS | `x86_64` | `arm64` / `aarch64` |
 |----|----------|---------------------|
 | macOS（Darwin） | `*_darwin_amd64.tar.gz` | `*_darwin_arm64.tar.gz` |
 | Linux | `*_linux_amd64.tar.gz` | `*_linux_arm64.tar.gz` |
 
-2 つのファイルを置いたディレクトリで次のコマンドを実行します。`archive` はダウンロードしたファイル名に置き換えてください。SHA-256 が一致した場合にだけ `~/.local/bin/kuroko` に配置します。
+GitHub CLI（`gh`）が使える場合は、作業用ディレクトリで次のコマンドを実行すると、最新版のアーカイブと `checksums.txt` を取得できます。例は macOS arm64 です。環境に応じて、表のパターンを指定してください。
 
 ```bash
-(
-  set -eu
-  archive=kuroko_0.3.0_darwin_arm64.tar.gz
-  checksum=$(awk -v file="$archive" '$2 == file { print; found = 1 } END { exit !found }' checksums.txt)
-  if command -v sha256sum >/dev/null 2>&1; then
-    printf '%s\n' "$checksum" | sha256sum -c -
-  else
-    printf '%s\n' "$checksum" | shasum -a 256 -c -
-  fi
+gh release download --repo nagayon-935/kuroko \
+  --pattern '*_darwin_arm64.tar.gz' --pattern 'checksums.txt'
+```
 
-  temp_dir=$(mktemp -d)
-  trap 'rm -rf "$temp_dir"' EXIT
-  tar -xzf "$archive" -C "$temp_dir" kuroko
-  mkdir -p "$HOME/.local/bin"
-  install -m 755 "$temp_dir/kuroko" "$HOME/.local/bin/kuroko"
-)
+ブラウザで取得する場合も、対応する `.tar.gz` 1 つと `checksums.txt` を同じ作業用ディレクトリに置きます。[GitHub Releases の最新版](https://github.com/nagayon-935/kuroko/releases/latest)
+
+macOS では `shasum -a 256 kuroko_*.tar.gz`、Linux では `sha256sum kuroko_*.tar.gz` を実行し、表示された値を `checksums.txt` の同じファイル名の行と照合します。
+
+値が一致したら、そのディレクトリで次のコマンドを実行します。
+
+```bash
+tar -xzf kuroko_*.tar.gz kuroko &&
+  mkdir -p "$HOME/.local/bin" &&
+  install -m 755 kuroko "$HOME/.local/bin/kuroko"
+```
+
+### ソースからビルドしてインストール
+
+Git、Go 1.26 以上、Make が必要です。`make install` はビルドしたバイナリを `~/.local/bin/kuroko` に配置します。
+
+```bash
+git clone https://github.com/nagayon-935/kuroko.git
+cd kuroko
+make install
 ```
 
 ### PATH の設定と動作確認
 
-zsh / bash で `~/.local/bin` を PATH に追加するには、次の1行を `~/.zshrc` または `~/.bashrc` に追加し、端末を開き直します。
+配布バイナリと `make install` の配置先は `~/.local/bin` です。`go install` で導入した場合は、以下の設定例の `$HOME/.local/bin` を `go env GOBIN` で表示されるディレクトリに置き換えます。空の場合は `go env GOPATH` で表示されるディレクトリの `bin` を使います。
+
+zsh / bash では、次の1行を `~/.zshrc` または `~/.bashrc` に追加し、端末を開き直します。
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
