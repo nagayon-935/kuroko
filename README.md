@@ -25,7 +25,7 @@ Go を使える環境では `go install` が手軽です。Go を入れていな
 ビルドには Go 1.26 以上が必要です。次のコマンドで `~/.local/bin` にインストールできます。更新するときも同じコマンドを使います。
 
 ```bash
-GOBIN="$HOME/.local/bin" go install github.com/nagayon-935/kuroko/cmd/kuroko@latest
+go install github.com/nagayon-935/kuroko/cmd/kuroko@latest
 ```
 
 ### ビルド済みバイナリでインストール
