@@ -12,26 +12,15 @@ func IsShellPrompt(p []byte) bool {
 		return false
 	}
 
-	var hasIndicator bool
 	var indicatorLen int
 	tail := p[len(p)-2:]
-	if bytes.Equal(tail, []byte("$ ")) || bytes.Equal(tail, []byte("# ")) || bytes.Equal(tail, []byte("% ")) || bytes.Equal(tail, []byte("> ")) {
-		hasIndicator = true
+	if isTwoBytePromptIndicator(tail) {
 		indicatorLen = 2
+	} else if idx := bytes.Index(p, heavyArrowIndicator); idx >= 0 {
+		indicatorLen = len(p) - idx
+	} else if idx := bytes.Index(p, arrowIndicator); idx >= 0 {
+		indicatorLen = len(p) - idx
 	} else {
-		// Check for multi-byte prompts like "❯ " or "➔ "
-		if bytes.Contains(p, []byte("❯")) {
-			idx := bytes.Index(p, []byte("❯"))
-			hasIndicator = true
-			indicatorLen = len(p) - idx
-		} else if bytes.Contains(p, []byte("➔")) {
-			idx := bytes.Index(p, []byte("➔"))
-			hasIndicator = true
-			indicatorLen = len(p) - idx
-		}
-	}
-
-	if !hasIndicator {
 		return false
 	}
 
@@ -45,13 +34,20 @@ func IsShellPrompt(p []byte) bool {
 	if trimmedPrefix[0] == '#' || trimmedPrefix[0] == '>' || trimmedPrefix[0] == '.' {
 		return false
 	}
+	var hasSpace, hasMarkerChar, hasParenChar bool
 	for _, b := range trimmedPrefix {
 		if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') {
 			continue
 		}
 		switch b {
-		case '_', '-', '.', '@', ':', '~', '/', '[', ']', '(', ')', '+', ' ':
+		case '_', '-', '.', '+':
 			continue
+		case ' ':
+			hasSpace = true
+		case '@', ':', '~', '/', '[', ']':
+			hasMarkerChar = true
+		case '(', ')':
+			hasParenChar = true
 		default:
 			return false
 		}
@@ -59,27 +55,16 @@ func IsShellPrompt(p []byte) bool {
 
 	// If indicator is "$ ", "% ", or "> ", require at least one prompt-specific character
 	// to prevent false positives from commands like "echo $ " or "cat $ " or "git branch $ ".
-	isCommonIndicator := bytes.Equal(tail, []byte("$ ")) || bytes.Equal(tail, []byte("% ")) || bytes.Equal(tail, []byte("> "))
-	if isCommonIndicator {
-		if !bytes.Contains(trimmedPrefix, []byte("@")) && !bytes.Contains(trimmedPrefix, []byte(":")) &&
-			!bytes.Contains(trimmedPrefix, []byte("~")) && !bytes.Contains(trimmedPrefix, []byte("/")) &&
-			!bytes.Contains(trimmedPrefix, []byte("[")) && !bytes.Contains(trimmedPrefix, []byte("]")) &&
-			!bytes.Contains(trimmedPrefix, []byte("(")) && !bytes.Contains(trimmedPrefix, []byte(")")) {
+	if indicatorLen == 2 && (tail[0] == '$' || tail[0] == '%' || tail[0] == '>') {
+		if !hasMarkerChar && !hasParenChar {
 			return false
 		}
 	}
 
-	// Check if the trimmed prefix contains spaces.
-	if bytes.Contains(trimmedPrefix, []byte(" ")) {
-		// If it contains spaces, it must either:
-		// - start with '(' or '['
-		// - or contain prompt-specific characters: '@', ':', '~', '/', '[', ']'
-		if !bytes.HasPrefix(trimmedPrefix, []byte("(")) && !bytes.HasPrefix(trimmedPrefix, []byte("[")) &&
-			!bytes.Contains(trimmedPrefix, []byte("@")) && !bytes.Contains(trimmedPrefix, []byte(":")) &&
-			!bytes.Contains(trimmedPrefix, []byte("~")) && !bytes.Contains(trimmedPrefix, []byte("/")) &&
-			!bytes.Contains(trimmedPrefix, []byte("[")) && !bytes.Contains(trimmedPrefix, []byte("]")) {
-			return false
-		}
+	// If the trimmed prefix contains spaces, it must either start with '(' or '['
+	// or contain one of the prompt-specific marker characters.
+	if hasSpace && trimmedPrefix[0] != '(' && trimmedPrefix[0] != '[' && !hasMarkerChar {
+		return false
 	}
 	return true
 }
@@ -202,8 +187,9 @@ func (p *promptTracker) classify(out []byte) ([]byte, bool) {
 	} else if p.networkMode {
 		// Case 1b: Network device prompt (Cisco/Arista/Juniper/…).
 		// NW devices do not perform readline accept-line redraws, so we
-		// detect the prompt directly from the committed line.
-		if prompt, cmd, info := SplitPromptInfo(out); info.Kind != KindNone && info.Kind != KindShell {
+		// detect the prompt directly from the committed line without
+		// repeating SplitPrompt.
+		if prompt, cmd, ok := splitNWPrompt(out); ok {
 			p.storedPrompt = append(p.storedPrompt[:0], prompt...)
 			hasCommand = len(cmd) > 0
 		}
@@ -217,7 +203,7 @@ func (p *promptTracker) classify(out []byte) ([]byte, bool) {
 // lineCommitted forgets the snapshot and prompt mark of the row that was
 // just committed.
 func (p *promptTracker) lineCommitted() {
-	p.savedLine = nil
+	p.savedLine = p.savedLine[:0]
 	p.marked = false
 }
 

@@ -29,7 +29,11 @@ func CompressFile(srcPath string) (string, error) {
 	defer dstFile.Close()
 	defer os.Remove(dstFile.Name())
 
-	if err := compressStreamWithComment(dstFile, srcFile, summaryComment(srcPath)); err != nil {
+	comment := summaryCommentFromFile(srcFile)
+	if _, err := srcFile.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+	if err := compressStreamWithComment(dstFile, srcFile, comment); err != nil {
 		return "", err
 	}
 
@@ -55,12 +59,12 @@ func CompressFile(srcPath string) (string, error) {
 	return dstPath, nil
 }
 
-// summaryComment builds the gzip header comment that lets readers learn how
-// a session ended without decompressing the archive. It returns "" when the
-// log has no complete footer (or cannot be read); that never blocks
-// compression.
-func summaryComment(srcPath string) string {
-	s, err := ReadSummary(srcPath)
+// summaryCommentFromFile builds the gzip header comment from an open plain log
+// file so readers can learn how a session ended without decompressing the
+// archive. It returns "" when the log has no complete footer (or cannot be
+// read); that never blocks compression.
+func summaryCommentFromFile(srcFile *os.File) string {
+	s, err := readSummary(srcFile)
 	if err != nil || s.ExitCode == nil || s.Ended.IsZero() {
 		return ""
 	}

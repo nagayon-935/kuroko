@@ -3,6 +3,8 @@ package viewer
 import (
 	"bytes"
 	"fmt"
+
+	"github.com/nagayon-935/kuroko/internal/logstore"
 )
 
 // RunAtLine opens the viewer on the command whose output contains the 1-based
@@ -84,7 +86,7 @@ func (v *Viewer) locateRawLine(line int) (cmdIdx, display int, err error) {
 	// line start, so every counted line is LF-terminated.
 	for pos := int(start); pos < off; {
 		nl := bytes.IndexByte(v.logData[pos:], '\n')
-		if !bytes.HasPrefix(v.logData[pos:pos+nl], outputLinePrefix) {
+		if !logstore.IsCommandMeta(v.logData[pos : pos+nl]) {
 			display++
 		}
 		pos += nl + 1

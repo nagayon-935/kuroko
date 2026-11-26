@@ -75,8 +75,7 @@ func (p *matchPicker) loop() error {
 // report) to the picker state.
 func (p *matchPicker) handleInput(key []byte) pickerAction {
 	if m, ok := tui.ParseMouse(key); ok {
-		p.handleMouse(m)
-		return pickerNone
+		return p.handleMouse(m)
 	}
 	if len(key) == 1 {
 		switch key[0] {
@@ -99,45 +98,47 @@ func (p *matchPicker) handleInput(key []byte) pickerAction {
 		}
 		return pickerNone
 	}
+	if tui.IsHomeKey(key) {
+		p.selected = 0
+		return pickerNone
+	}
+	if tui.IsEndKey(key) {
+		p.selected = len(p.matches) - 1
+		return pickerNone
+	}
+	if dir := tui.PageDir(key); dir != 0 {
+		p.move(dir * p.bodyHeight())
+		return pickerNone
+	}
 	if c, ok := tui.CSIKey(key); ok {
 		switch c {
 		case 'A':
 			p.move(-1)
 		case 'B':
 			p.move(1)
-		case 'H':
-			p.selected = 0
-		case 'F':
-			p.selected = len(p.matches) - 1
-		}
-		return pickerNone
-	}
-	if c, ok := tui.TildeKey(key); ok {
-		switch c {
-		case '5':
-			p.move(-p.bodyHeight())
-		case '6':
-			p.move(p.bodyHeight())
-		case '1', '7':
-			p.selected = 0
-		case '4', '8':
-			p.selected = len(p.matches) - 1
 		}
 	}
 	return pickerNone
 }
 
-func (p *matchPicker) handleMouse(m tui.Mouse) {
+func (p *matchPicker) handleMouse(m tui.Mouse) pickerAction {
 	switch m.Button {
 	case tui.MouseWheelUp:
 		p.move(-1)
 	case tui.MouseWheelDown:
 		p.move(1)
 	case tui.MouseLeft:
+		if m.Release {
+			return pickerNone
+		}
 		if idx := tui.ClickRowToIndex(m.Y-3, p.scroll, len(p.matches)); idx >= 0 {
+			if idx == p.selected {
+				return pickerOpen
+			}
 			p.selected = idx
 		}
 	}
+	return pickerNone
 }
 
 // move shifts the selection by delta, clamped to the list.

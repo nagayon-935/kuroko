@@ -765,3 +765,77 @@ func variedLog(n int) string {
 	}
 	return sb.String()
 }
+
+func TestViewerSearchPreservesCommandFilterAndSupportsCancel(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "test.log")
+	if err := os.WriteFile(logPath, []byte(testLogContent), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	v, err := newViewer(logPath)
+	if err != nil {
+		t.Fatalf("newViewer(): %v", err)
+	}
+
+	// 1. Filter timeline commands with "/" -> "cat" + Enter.
+	v.handleKey('/')
+	v.handleSearchKey([]byte("cat"))
+	v.handleSearchKey([]byte{'\r'})
+	if len(v.filteredIdx) != 1 || v.allCmds[v.filteredIdx[0]].Command != "cat file.txt" {
+		t.Fatalf("filteredIdx after /cat = %v; want only 'cat file.txt'", v.filteredIdx)
+	}
+
+	// 2. Search output with "f" -> "hello" + Enter; timeline filter "cat" must remain intact.
+	v.handleKey('f')
+	v.handleSearchKey([]byte("hello"))
+	v.handleSearchKey([]byte{'\r'})
+	if v.searchQuery != "cat" {
+		t.Errorf("command filter searchQuery = %q; want %q preserved after output search", v.searchQuery, "cat")
+	}
+	if v.outputQuery != "hello" || len(v.matchLines) != 1 {
+		t.Errorf("outputQuery = %q, matches = %v; want 'hello' with 1 match", v.outputQuery, v.matchLines)
+	}
+
+	// 3. Start another output search, type "nomatch", then cancel with Esc -> restores "hello".
+	v.handleKey('f')
+	v.handleSearchKey([]byte("nomatch"))
+	v.handleSearchKey([]byte{27})
+	if v.outputQuery != "hello" || len(v.matchLines) != 1 {
+		t.Errorf("after Esc cancel: outputQuery = %q, matches = %v; want 'hello' restored", v.outputQuery, v.matchLines)
+	}
+
+	// 4. Start command search "/", type "zzz", then cancel with Esc -> restores "cat".
+	v.handleKey('/')
+	v.handleSearchKey([]byte("zzz"))
+	v.handleSearchKey([]byte{27})
+	if v.searchQuery != "cat" || len(v.filteredIdx) != 1 {
+		t.Errorf("after Esc cancel on /: searchQuery = %q, filteredIdx = %v; want 'cat' restored", v.searchQuery, v.filteredIdx)
+	}
+}
+
+func TestViewerJumpAndPageNavigation(t *testing.T) {
+	var sb strings.Builder
+	for i := 0; i < 30; i++ {
+		fmt.Fprintf(&sb, "# kuroko:cmd:2026-06-18T12:%02d:00+09:00\nuser@host:~$ cmd%d\nout%d\n", i, i, i)
+	}
+	logPath := writeTemp(t, "jump.log", []byte(sb.String()))
+	v, err := newViewer(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v.width, v.height = 80, 13 // bodyHeight = 10
+
+	// Timeline jump G / g and PageDown / PageUp.
+	v.handleKey('G')
+	if v.selected != len(v.filteredIdx)-1 {
+		t.Fatalf("G on timeline: selected = %d; want %d", v.selected, len(v.filteredIdx)-1)
+	}
+	v.handleEscapeKey([]byte("\x1b[5~")) // PageUp on timeline
+	if v.selected != len(v.filteredIdx)-1-10 {
+		t.Fatalf("PageUp on timeline: selected = %d; want %d", v.selected, len(v.filteredIdx)-11)
+	}
+	v.handleKey('g')
+	if v.selected != 0 {
+		t.Fatalf("g on timeline: selected = %d; want 0", v.selected)
+	}
+}

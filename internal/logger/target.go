@@ -198,17 +198,18 @@ func extractScreenTarget(args []string) string {
 
 const maxFilenamePartBytes = 96
 
+var filenameReplacer = strings.NewReplacer(
+	"/", "_", ":", "_", " ", "_", "\\", "_",
+	"*", "_", "?", "_", "\"", "_", "<", "_", ">", "_", "|", "_",
+)
+
 func sanitize(s string) string {
-	r := strings.NewReplacer(
-		"/", "_", ":", "_", " ", "_", "\\", "_",
-		"*", "_", "?", "_", "\"", "_", "<", "_", ">", "_", "|", "_",
-	)
 	out := strings.Map(func(c rune) rune {
 		if unicode.IsControl(c) || unicode.Is(unicode.Cf, c) {
 			return '_'
 		}
 		return c
-	}, r.Replace(s))
+	}, filenameReplacer.Replace(s))
 	if len(out) > maxFilenamePartBytes {
 		out = out[:maxFilenamePartBytes]
 		for len(out) > 0 && !utf8.ValidString(out) {

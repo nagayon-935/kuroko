@@ -1,7 +1,7 @@
 package logger
 
 import (
-	"bytes"
+	"unicode/utf8"
 
 	"github.com/nagayon-935/kuroko/internal/textwidth"
 )
@@ -43,7 +43,7 @@ type lineBuffer struct {
 // way: the shell jumps right, prints it, and jumps back, so the gap keeps it
 // out of the command line. Trailing blanks right of the cursor are dropped
 // too: they are what "\b \b" leaves behind when erasing the last character.
-func (b *lineBuffer) text() []byte {
+func (b *lineBuffer) visibleEnd() int {
 	end := min(b.col, len(b.cells))
 	if b.steppedBack {
 		for end < len(b.cells) && b.cells[end] != gapCell {
@@ -53,12 +53,21 @@ func (b *lineBuffer) text() []byte {
 			end--
 		}
 	}
-	return renderLine(b.cells[:end])
+	return end
 }
 
-// textToCursor renders the row up to the cursor, whatever lies right of it.
-func (b *lineBuffer) textToCursor() []byte {
-	return renderLine(b.cells[:min(b.col, len(b.cells))])
+func (b *lineBuffer) text() []byte {
+	return renderLine(b.cells[:b.visibleEnd()])
+}
+
+// textInto renders the row like text, reusing dst's backing array when large enough.
+func (b *lineBuffer) textInto(dst []byte) []byte {
+	return renderLineInto(dst, b.cells[:b.visibleEnd()])
+}
+
+// textToCursorInto renders the row up to the cursor, reusing dst when large enough.
+func (b *lineBuffer) textToCursorInto(dst []byte) []byte {
+	return renderLineInto(dst, b.cells[:min(b.col, len(b.cells))])
 }
 
 // reset empties the row and returns the cursor to column 0.
@@ -175,16 +184,27 @@ func (b *lineBuffer) setCell(col int, r rune) {
 // spaces. It is the inverse of
 // lineBuffer.put, which spreads one rune across 1 or 2 columns.
 func renderLine(cells []rune) []byte {
-	var buf bytes.Buffer
-	buf.Grow(len(cells))
+	return renderLineInto(nil, cells)
+}
+
+func renderLineInto(dst []byte, cells []rune) []byte {
+	if cap(dst) < len(cells) {
+		dst = make([]byte, 0, max(len(cells)*2, 64))
+	}
+	dst = dst[:0]
 	for _, r := range cells {
 		switch r {
 		case wideContinuation:
 			continue
 		case gapCell:
-			r = ' '
+			dst = append(dst, ' ')
+		default:
+			if r < utf8.RuneSelf {
+				dst = append(dst, byte(r))
+			} else {
+				dst = utf8.AppendRune(dst, r)
+			}
 		}
-		buf.WriteRune(r)
 	}
-	return buf.Bytes()
+	return dst
 }

@@ -20,6 +20,11 @@ type pendingRow struct {
 	text []byte // the row's rendered content, without trailing newline
 }
 
+// maxRecycledRowCap bounds the byte capacity of a row buffer kept for reuse,
+// so a single unusually long line never pins large memory for the rest of a
+// session.
+const maxRecycledRowCap = 4096
+
 // rowWindow holds the most recently committed rows in memory, where cursor
 // movement can still rewrite them, and writes rows to out once they scroll
 // out of reach.
@@ -32,7 +37,8 @@ type rowWindow struct {
 	out    io.Writer
 	limit  int // terminal height in rows; 0 until known
 	rows   []pendingRow
-	cursor int // index into rows the next commit lands on; == len(rows) means "new row"
+	free   []pendingRow // recycled row buffers for zero-alloc steady state
+	cursor int          // index into rows the next commit lands on; == len(rows) means "new row"
 }
 
 // capacity returns how many committed rows the window may hold.
@@ -55,13 +61,26 @@ func (w *rowWindow) setLimit(rows int) error {
 	return w.trim()
 }
 
+func (w *rowWindow) recycle(row pendingRow) {
+	if cap(row.text) <= maxRecycledRowCap && len(w.free) < maxPendingRows {
+		row.meta = row.meta[:0]
+		row.text = row.text[:0]
+		w.free = append(w.free, row)
+	}
+}
+
 // trim writes out the oldest rows until the window is within capacity.
 func (w *rowWindow) trim() error {
-	for len(w.rows) > w.capacity() {
-		if err := w.write(w.rows[0]); err != nil {
+	capLimit := w.capacity()
+	for len(w.rows) > capLimit {
+		evicted := w.rows[0]
+		if err := w.write(evicted); err != nil {
 			return err
 		}
-		w.rows = w.rows[1:]
+		w.recycle(evicted)
+		copy(w.rows, w.rows[1:])
+		w.rows[len(w.rows)-1] = pendingRow{}
+		w.rows = w.rows[:len(w.rows)-1]
 		w.cursor = max(w.cursor-1, 0)
 	}
 	return nil
@@ -74,9 +93,32 @@ func (w *rowWindow) trim() error {
 // Rows that scroll off the top of the window (beyond its capacity) are
 // written out in order, since a redraw can no longer reach them.
 func (w *rowWindow) commit(row pendingRow) error {
+	return w.commitBytes(row.meta, row.text)
+}
+
+// commitBytes copies meta and text into a pooled pendingRow at the cursor.
+func (w *rowWindow) commitBytes(meta, text []byte) error {
 	if w.cursor < len(w.rows) {
-		w.rows[w.cursor] = row
+		dst := &w.rows[w.cursor]
+		if len(meta) > 0 {
+			dst.meta = append(dst.meta[:0], meta...)
+		} else {
+			dst.meta = dst.meta[:0]
+		}
+		dst.text = append(dst.text[:0], text...)
 	} else {
+		var row pendingRow
+		if n := len(w.free); n > 0 {
+			row = w.free[n-1]
+			w.free[n-1] = pendingRow{}
+			w.free = w.free[:n-1]
+		}
+		if len(meta) > 0 {
+			row.meta = append(row.meta[:0], meta...)
+		} else {
+			row.meta = row.meta[:0]
+		}
+		row.text = append(row.text[:0], text...)
 		w.rows = append(w.rows, row)
 	}
 	w.cursor++
@@ -96,6 +138,10 @@ func (w *rowWindow) down(n int) { w.cursor = min(w.cursor+n, len(w.rows)) }
 // which a redraw is about to overwrite.
 func (w *rowWindow) eraseBelow() {
 	if w.cursor < len(w.rows) {
+		for i := w.cursor; i < len(w.rows); i++ {
+			w.recycle(w.rows[i])
+			w.rows[i] = pendingRow{}
+		}
 		w.rows = w.rows[:w.cursor]
 	}
 }
@@ -109,10 +155,12 @@ func (w *rowWindow) eraseAll() error { return w.flush() }
 // flush writes every remaining pending row in order, e.g. once the session
 // ends and no further redraw can occur.
 func (w *rowWindow) flush() error {
-	for _, row := range w.rows {
+	for i, row := range w.rows {
 		if err := w.write(row); err != nil {
 			return err
 		}
+		w.recycle(row)
+		w.rows[i] = pendingRow{}
 	}
 	w.rows = w.rows[:0]
 	w.cursor = 0

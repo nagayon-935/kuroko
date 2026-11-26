@@ -3,8 +3,8 @@ package tui
 import (
 	"bytes"
 	"os"
-	"regexp"
-	"strconv"
+	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -31,18 +31,17 @@ const (
 )
 
 // readBufSize bounds a single key read; it comfortably fits SGR mouse
-// reports and CSI sequences.
-const readBufSize = 16
+// reports, CSI sequences, multi-byte UTF-8 runes, and short pastes.
+const readBufSize = 64
 
-var (
-	mousePrefix = []byte("\x1b[<")
-	mouseRegexp = regexp.MustCompile(`^\x1b\[<(\d+);(\d+);(\d+)([Mm])`)
-)
+var mousePrefix = []byte("\x1b[<")
 
 // Mouse is a decoded SGR (1006) mouse report. X and Y are 1-based terminal
-// columns and rows. Button is -1 for a malformed report.
+// columns and rows. Release is true for a button-release ('m') report.
+// Button is -1 for a malformed report.
 type Mouse struct {
 	Button, X, Y int
+	Release      bool
 }
 
 // ReadKey blocks until stdin delivers input and returns the raw bytes of
@@ -63,20 +62,59 @@ func ParseMouse(key []byte) (Mouse, bool) {
 	if !bytes.HasPrefix(key, mousePrefix) {
 		return Mouse{}, false
 	}
-	m := mouseRegexp.FindSubmatch(key)
-	if len(m) != 5 {
+	rest := key[len(mousePrefix):]
+	btn, rest, ok := parseUintField(rest, ';')
+	if !ok {
 		return Mouse{Button: -1}, true
 	}
-	btn, _ := strconv.Atoi(string(m[1]))
-	x, _ := strconv.Atoi(string(m[2]))
-	y, _ := strconv.Atoi(string(m[3]))
-	return Mouse{Button: btn, X: x, Y: y}, true
+	x, rest, ok := parseUintField(rest, ';')
+	if !ok {
+		return Mouse{Button: -1}, true
+	}
+	y, rest, ok := parseMouseTail(rest)
+	if !ok {
+		return Mouse{Button: -1}, true
+	}
+	return Mouse{Button: btn, X: x, Y: y, Release: rest[0] == 'm'}, true
+}
+
+func parseUintField(b []byte, sep byte) (val int, rest []byte, ok bool) {
+	i := 0
+	for i < len(b) && b[i] >= '0' && b[i] <= '9' {
+		val = val*10 + int(b[i]-'0')
+		i++
+	}
+	if i == 0 || i >= len(b) || b[i] != sep {
+		return 0, nil, false
+	}
+	return val, b[i+1:], true
+}
+
+func parseMouseTail(b []byte) (val int, rest []byte, ok bool) {
+	i := 0
+	for i < len(b) && b[i] >= '0' && b[i] <= '9' {
+		val = val*10 + int(b[i]-'0')
+		i++
+	}
+	if i == 0 || i >= len(b) || (b[i] != 'M' && b[i] != 'm') {
+		return 0, nil, false
+	}
+	return val, b[i:], true
 }
 
 // CSIKey returns the final byte of a three-byte CSI sequence such as an
-// arrow key (ESC [ A..D).
+// arrow key (ESC [ A..D) or Home/End (ESC [ H / ESC [ F).
 func CSIKey(key []byte) (byte, bool) {
 	if len(key) == 3 && key[0] == KeyEsc && key[1] == '[' {
+		return key[2], true
+	}
+	return 0, false
+}
+
+// SS3Key returns the final byte of a three-byte SS3 sequence (ESC O H / F),
+// which application-cursor terminals emit for Home and End.
+func SS3Key(key []byte) (byte, bool) {
+	if len(key) == 3 && key[0] == KeyEsc && key[1] == 'O' {
 		return key[2], true
 	}
 	return 0, false
@@ -89,6 +127,47 @@ func TildeKey(key []byte) (byte, bool) {
 		return key[2], true
 	}
 	return 0, false
+}
+
+// IsHomeKey reports whether key is a terminal Home key sequence.
+func IsHomeKey(key []byte) bool {
+	if c, ok := CSIKey(key); ok && c == 'H' {
+		return true
+	}
+	if c, ok := SS3Key(key); ok && c == 'H' {
+		return true
+	}
+	if c, ok := TildeKey(key); ok && (c == '1' || c == '7') {
+		return true
+	}
+	return false
+}
+
+// IsEndKey reports whether key is a terminal End key sequence.
+func IsEndKey(key []byte) bool {
+	if c, ok := CSIKey(key); ok && c == 'F' {
+		return true
+	}
+	if c, ok := SS3Key(key); ok && c == 'F' {
+		return true
+	}
+	if c, ok := TildeKey(key); ok && (c == '4' || c == '8') {
+		return true
+	}
+	return false
+}
+
+// PageDir returns -1 for PageUp, +1 for PageDown, or 0 otherwise.
+func PageDir(key []byte) int {
+	if c, ok := TildeKey(key); ok {
+		switch c {
+		case '5':
+			return -1
+		case '6':
+			return 1
+		}
+	}
+	return 0
 }
 
 // EditResult describes what EditLine did with a key.
@@ -107,29 +186,56 @@ const (
 	EditInterrupt
 )
 
-// EditLine applies a single-byte key to a search prompt that accepts
-// printable ASCII. Multi-byte keys are ignored.
+// EditLine applies a key read to a search prompt: control keys submit, cancel,
+// clear (Ctrl+U), or erase a UTF-8 rune, escape sequences are ignored, and
+// printable UTF-8 text (including Japanese characters and pasted text) is
+// appended.
 func EditLine(line string, key []byte) (string, EditResult) {
-	if len(key) != 1 {
+	if len(key) == 0 {
 		return line, EditIgnored
 	}
-	switch b := key[0]; b {
-	case KeyCR, KeyLF:
-		return line, EditSubmit
-	case KeyEsc:
-		return line, EditCancel
-	case KeyCtrlC:
-		return line, EditInterrupt
-	case KeyDelete, KeyBackspace:
-		if line == "" {
+	if len(key) == 1 {
+		switch b := key[0]; b {
+		case KeyCR, KeyLF:
+			return line, EditSubmit
+		case KeyEsc:
+			return line, EditCancel
+		case KeyCtrlC:
+			return line, EditInterrupt
+		case KeyCtrlU:
+			if line == "" {
+				return line, EditIgnored
+			}
+			return "", EditChanged
+		case KeyDelete, KeyBackspace:
+			if line == "" {
+				return line, EditIgnored
+			}
+			_, size := utf8.DecodeLastRuneInString(line)
+			return line[:len(line)-size], EditChanged
+		default:
+			if b >= 32 && b < 127 {
+				return line + string(b), EditChanged
+			}
 			return line, EditIgnored
 		}
-		_, size := utf8.DecodeLastRuneInString(line)
-		return line[:len(line)-size], EditChanged
-	default:
-		if b >= 32 && b < 127 {
-			return line + string(b), EditChanged
-		}
+	}
+	if key[0] == KeyEsc || !utf8.Valid(key) {
 		return line, EditIgnored
 	}
+	var b strings.Builder
+	b.WriteString(line)
+	added := false
+	for len(key) > 0 {
+		r, size := utf8.DecodeRune(key)
+		key = key[size:]
+		if unicode.IsPrint(r) && !unicode.IsControl(r) && !unicode.Is(unicode.Cf, r) {
+			b.WriteRune(r)
+			added = true
+		}
+	}
+	if !added {
+		return line, EditIgnored
+	}
+	return b.String(), EditChanged
 }

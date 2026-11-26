@@ -7,6 +7,7 @@ package console
 
 import (
 	"fmt"
+	"io"
 	"os"
 )
 
@@ -17,21 +18,36 @@ const (
 	reset  = "\033[0m"
 )
 
-// Errorf prints a red error message.
+// Errorf prints a red error message to os.Stderr.
 func Errorf(format string, args ...any) {
-	printf(red, format, args...)
+	Ferrorf(os.Stderr, format, args...)
 }
 
-// Warnf prints a yellow warning message.
+// Warnf prints a yellow warning message to os.Stderr.
 func Warnf(format string, args ...any) {
-	printf(yellow, format, args...)
+	Fwarnf(os.Stderr, format, args...)
 }
 
-// Infof prints a dim informational message.
+// Infof prints a dim informational message to os.Stderr.
 func Infof(format string, args ...any) {
-	printf(dim, format, args...)
+	Finfof(os.Stderr, format, args...)
 }
 
-func printf(color, format string, args ...any) {
-	fmt.Fprintf(os.Stderr, color+"[kuroko] "+format+reset+"\n", args...)
+// Ferrorf writes a red error message to w.
+func Ferrorf(w io.Writer, format string, args ...any) {
+	fprintf(w, red, format, args...)
+}
+
+// Fwarnf writes a yellow warning message to w.
+func Fwarnf(w io.Writer, format string, args ...any) {
+	fprintf(w, yellow, format, args...)
+}
+
+// Finfof writes a dim informational message to w.
+func Finfof(w io.Writer, format string, args ...any) {
+	fprintf(w, dim, format, args...)
+}
+
+func fprintf(w io.Writer, color, format string, args ...any) {
+	fmt.Fprintf(w, color+"[kuroko] "+format+reset+"\n", args...)
 }

@@ -324,3 +324,43 @@ func TestSelectorSortUsesStartedRatherThanModified(t *testing.T) {
 		t.Fatalf("oldest=%s", s.items[0].name)
 	}
 }
+
+func TestSelectorNavigationAndSearchCancel(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 25; i++ {
+		saveViewerLog(t, dir, fmt.Sprintf("20260618_%02d.log", i), "log\n")
+	}
+	s, err := newSelector(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.width, s.height = 80, 13 // bodyHeight = 10
+
+	// G / g / PageDown / PageUp
+	_, _ = s.handleKey(nil, 'G')
+	if s.selected != 24 {
+		t.Fatalf("G: selected = %d; want 24", s.selected)
+	}
+	s.handleEscapeKey([]byte("\x1b[5~"))
+	if s.selected != 14 {
+		t.Fatalf("PageUp: selected = %d; want 14", s.selected)
+	}
+	_, _ = s.handleKey(nil, 'g')
+	if s.selected != 0 {
+		t.Fatalf("g: selected = %d; want 0", s.selected)
+	}
+
+	// Filter -> confirm "_05", then start new filter, type "zzz", cancel with Esc -> restores "_05".
+	_, _ = s.handleKey(nil, '/')
+	s.handleSearchKey([]byte("_05"))
+	s.handleSearchKey([]byte{'\r'})
+	if len(s.filtered) != 1 {
+		t.Fatalf("filtered = %d; want 1", len(s.filtered))
+	}
+	_, _ = s.handleKey(nil, '/')
+	s.handleSearchKey([]byte("zzz"))
+	s.handleSearchKey([]byte{27})
+	if s.searchQuery != "_05" || len(s.filtered) != 1 {
+		t.Fatalf("after Esc cancel: query = %q, filtered = %d; want '_05', 1", s.searchQuery, len(s.filtered))
+	}
+}

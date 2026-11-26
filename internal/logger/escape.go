@@ -31,26 +31,36 @@ func indexAny(data []byte, seqs [][]byte) (idx, n int) {
 // Bare \r (overwrite/carriage-return without newline) is preserved so that
 // the terminal can simulate readline's in-place line editing.
 func normalizeLineEndings(p []byte) []byte {
-	out := make([]byte, 0, len(p))
-	for i := 0; i < len(p); i++ {
-		if p[i] != '\r' {
-			out = append(out, p[i])
-			continue
+	if bytes.IndexByte(p, '\r') < 0 {
+		return p
+	}
+	return normalizeLineEndingsInto(nil, p)
+}
+
+func normalizeLineEndingsInto(dst, p []byte) []byte {
+	if cap(dst) < len(p) {
+		dst = make([]byte, 0, len(p))
+	}
+	for len(p) > 0 {
+		idx := bytes.IndexByte(p, '\r')
+		if idx < 0 {
+			return append(dst, p...)
 		}
-		// Scan past consecutive \r characters.
-		j := i + 1
+		dst = append(dst, p[:idx]...)
+		j := idx + 1
 		for j < len(p) && p[j] == '\r' {
 			j++
 		}
 		if j < len(p) && p[j] == '\n' {
-			// \r+\n → skip the \r run; the loop will emit the \n next.
-			i = j - 1
+			// \r+\n → skip the \r run; next iteration starts at '\n'.
+			p = p[j:]
 			continue
 		}
-		// Bare \r — keep it for the terminal.
-		out = append(out, '\r')
+		// Bare \r (or run of bare \r) — preserve for readline overwrites.
+		dst = append(dst, p[idx:j]...)
+		p = p[j:]
 	}
-	return out
+	return dst
 }
 
 // incompleteEscapePrefix returns the number of trailing bytes in data that

@@ -2,7 +2,6 @@ package logger
 
 import (
 	"path/filepath"
-	"strings"
 )
 
 // PromptKind classifies the kind of prompt detected on a line.
@@ -23,22 +22,31 @@ type PromptInfo struct {
 	Mode     string // config sub-mode, e.g. "config-if", "config-router"; empty for non-config
 }
 
-// matchNWPrompt is a linear-time scanner equivalent to the regex
+// nwPromptMatch holds byte offsets of a matched network-device prompt on the
+// stack so hot paths do not allocate a submatch slice on the heap.
+type nwPromptMatch struct {
+	end       int // end of full prompt (past '#' or '>')
+	hostEnd   int // end of hostname (starts at 0)
+	modeStart int // start of mode inside parens, or -1 if absent
+	modeEnd   int // end of mode inside parens, or -1 if absent
+	indIdx    int // index of '#' or '>'
+}
+
+// scanNWPrompt is a zero-allocation linear-time scanner equivalent to the regex
 //
 //	^([A-Za-z][A-Za-z0-9._@-]*)(\(([A-Za-z0-9][A-Za-z0-9._-]*)\))?([#>])
 //
 // (kept as nwPromptRe in nw_prompt_test.go and used as a test oracle).
-// It returns the same 10-element submatch index slice as
-// FindSubmatchIndex (unmatched optional groups are -1), or nil.
 //
 // Backtracking can never help: '(', ')', '#' and '>' belong to neither the
 // hostname nor the mode character class, so a shorter run is always followed
 // by a class byte that cannot satisfy the next element. Non-ASCII bytes are
-// in no class and simply end a run.
-func matchNWPrompt(line []byte) []int {
+// in no class and simply end a run. Because line[0] must be an ASCII letter
+// and host bytes exclude ':' and '/', URLs and pure-digit strings never match.
+func scanNWPrompt(line []byte) (nwPromptMatch, bool) {
 	n := len(line)
 	if n == 0 || !isASCIILetter(line[0]) {
-		return nil
+		return nwPromptMatch{}, false
 	}
 	i := 1
 	for i < n && isHostByte(line[i]) {
@@ -46,17 +54,23 @@ func matchNWPrompt(line []byte) []int {
 	}
 	hostEnd := i
 	if i >= n {
-		return nil
+		return nwPromptMatch{}, false
 	}
 	if c := line[i]; c == '#' || c == '>' {
-		return []int{0, i + 1, 0, hostEnd, -1, -1, -1, -1, i, i + 1}
+		return nwPromptMatch{
+			end:       i + 1,
+			hostEnd:   hostEnd,
+			modeStart: -1,
+			modeEnd:   -1,
+			indIdx:    i,
+		}, true
 	}
 	if line[i] != '(' {
-		return nil
+		return nwPromptMatch{}, false
 	}
 	modeStart := i + 1
 	if modeStart >= n || !isASCIIAlnum(line[modeStart]) {
-		return nil
+		return nwPromptMatch{}, false
 	}
 	j := modeStart + 1
 	for j < n && isModeByte(line[j]) {
@@ -64,18 +78,50 @@ func matchNWPrompt(line []byte) []int {
 	}
 	// need ')' then '#' or '>'
 	if j+1 >= n || line[j] != ')' {
-		return nil
+		return nwPromptMatch{}, false
 	}
 	if c := line[j+1]; c != '#' && c != '>' {
+		return nwPromptMatch{}, false
+	}
+	return nwPromptMatch{
+		end:       j + 2,
+		hostEnd:   hostEnd,
+		modeStart: modeStart,
+		modeEnd:   j,
+		indIdx:    j + 1,
+	}, true
+}
+
+// matchNWPrompt returns the same 10-element submatch index slice as
+// nwPromptRe.FindSubmatchIndex (unmatched optional groups are -1), or nil.
+func matchNWPrompt(line []byte) []int {
+	m, ok := scanNWPrompt(line)
+	if !ok {
 		return nil
 	}
-	return []int{0, j + 2, 0, hostEnd, hostEnd, j + 1, modeStart, j, j + 1, j + 2}
+	if m.modeStart < 0 {
+		return []int{0, m.end, 0, m.hostEnd, -1, -1, -1, -1, m.indIdx, m.end}
+	}
+	return []int{0, m.end, 0, m.hostEnd, m.hostEnd, m.modeEnd + 1, m.modeStart, m.modeEnd, m.indIdx, m.end}
 }
 
 func isASCIILetter(c byte) bool { return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' }
 func isASCIIAlnum(c byte) bool  { return isASCIILetter(c) || c >= '0' && c <= '9' }
 func isModeByte(c byte) bool    { return isASCIIAlnum(c) || c == '.' || c == '_' || c == '-' }
 func isHostByte(c byte) bool    { return isModeByte(c) || c == '@' }
+
+// splitNWPrompt extracts a network-device prompt and trailing command without
+// allocating strings or running shell-prompt heuristics.
+func splitNWPrompt(line []byte) (prompt, cmd []byte, ok bool) {
+	m, matched := scanNWPrompt(line)
+	if !matched {
+		return nil, nil, false
+	}
+	if m.end < len(line) {
+		cmd = line[m.end:]
+	}
+	return line[:m.end], cmd, true
+}
 
 // SplitPromptInfo analyses line and returns:
 //   - prompt: the prompt prefix bytes (nil if not detected)
@@ -84,61 +130,34 @@ func isHostByte(c byte) bool    { return isModeByte(c) || c == '@' }
 //
 // Detection order:
 //  1. SplitPrompt incremental scan (bash/zsh/fish/starship etc.) → KindShell.
-//  2. Else try NW device prompt regex.
+//  2. Else try NW device prompt scanner.
 func SplitPromptInfo(line []byte) (prompt, cmd []byte, info PromptInfo) {
-	// 1. Existing shell-prompt detection via incremental prefix scan.
-	// SplitPrompt handles lines with trailing commands ("user@host:~$ ls")
-	// correctly because it scans from the left, unlike IsShellPrompt which
-	// checks the full line ending.
 	if p, c := SplitPrompt(line); p != nil {
 		return p, c, PromptInfo{Kind: KindShell}
 	}
 
-	// 2. NW device prompt
-	// Bail out fast on lines that cannot be NW prompts.
-	if len(line) == 0 || line[0] == ' ' || line[0] == '\t' || line[0] == '#' || line[0] == '!' {
-		return nil, nil, PromptInfo{}
-	}
-	// Note: "# kuroko:" metadata lines are already rejected above because
-	// they start with '#'.
-
-	m := matchNWPrompt(line)
-	if m == nil {
+	m, ok := scanNWPrompt(line)
+	if !ok {
 		return nil, nil, PromptInfo{}
 	}
 
-	// m[0:2] = full match, m[2:4]=hostname, m[4:6]=(mode-parens), m[6:8]=mode, m[8:10]=indicator
-	hostname := string(line[m[2]:m[3]])
-	mode := ""
-	if m[6] >= 0 {
-		mode = string(line[m[6]:m[7]])
-	}
-	indicator := line[m[8]]
-
+	hostname := string(line[:m.hostEnd])
+	var mode string
 	var kind PromptKind
 	switch {
-	case mode != "":
+	case m.modeStart >= 0:
+		mode = string(line[m.modeStart:m.modeEnd])
 		kind = KindConfig
-	case indicator == '#':
+	case line[m.indIdx] == '#':
 		kind = KindPrivileged
 	default:
 		kind = KindUser
 	}
 
-	// Guard: reject if hostname looks like a URL path or numeric comparison.
-	// Hostname must not contain "://" or consist solely of digits.
-	if strings.Contains(hostname, "://") {
-		return nil, nil, PromptInfo{}
-	}
-	if isAllDigits(hostname) {
-		return nil, nil, PromptInfo{}
-	}
-
-	promptEnd := m[1] // end of the full match (after # or >)
-	promptBytes := line[:promptEnd]
+	promptBytes := line[:m.end]
 	var cmdBytes []byte
-	if promptEnd < len(line) {
-		cmdBytes = line[promptEnd:]
+	if m.end < len(line) {
+		cmdBytes = line[m.end:]
 	}
 
 	return promptBytes, cmdBytes, PromptInfo{
@@ -146,15 +165,6 @@ func SplitPromptInfo(line []byte) (prompt, cmd []byte, info PromptInfo) {
 		Hostname: hostname,
 		Mode:     mode,
 	}
-}
-
-func isAllDigits(s string) bool {
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return false
-		}
-	}
-	return len(s) > 0
 }
 
 // isNetworkSessionCommand returns true when the wrapping command suggests

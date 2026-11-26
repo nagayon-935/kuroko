@@ -26,7 +26,8 @@ const MaxLineBytes = 1 << 20
 // (at a rune boundary) instead of keeping up to MaxLineBytes per match.
 const MaxMatchTextBytes = 1024
 
-var metaPrefix = []byte("# kuroko:cmd:")
+// scanBufSize sizes the reusable buffered reader shared across searched files.
+const scanBufSize = 64 * 1024
 
 // Options tunes Search.
 type Options struct {
@@ -48,8 +49,9 @@ type Result struct {
 // <relative path>:<line>:<text>, in relative-path order. Logs that cannot be
 // read are reported on warn and skipped. It reports whether anything matched and how many logs were skipped.
 func Search(dir string, re *regexp.Regexp, opt Options, out, warn io.Writer) (Result, error) {
+	br := bufio.NewReaderSize(nil, scanBufSize)
 	return scanLogs(dir, warn, func(f logstore.LogFile) (bool, bool, error) {
-		ok, err := searchFile(f, re, opt, out)
+		ok, err := searchFile(br, f, re, opt, out)
 		return ok, false, err
 	})
 }
@@ -78,10 +80,11 @@ func Collect(dir string, re *regexp.Regexp, limit int, warn io.Writer) ([]Match,
 	if err != nil {
 		return nil, Result{}, err
 	}
+	br := bufio.NewReaderSize(nil, scanBufSize)
 	var matches []Match
 	var capped bool
 	res, err := scanLogs(absDir, warn, func(f logstore.LogFile) (bool, bool, error) {
-		matched, err := scanFile(f.Path, re, func(n int, text []byte) (bool, error) {
+		matched, err := scanFile(br, f.Path, re, func(n int, text []byte) (bool, error) {
 			if limit > 0 && len(matches) >= limit {
 				capped = true
 				return true, nil
@@ -152,8 +155,8 @@ type writeError struct{ err error }
 func (e writeError) Error() string { return "writing output: " + e.err.Error() }
 func (e writeError) Unwrap() error { return e.err }
 
-func searchFile(f logstore.LogFile, re *regexp.Regexp, opt Options, out io.Writer) (bool, error) {
-	return scanFile(f.Path, re, func(n int, line []byte) (bool, error) {
+func searchFile(br *bufio.Reader, f logstore.LogFile, re *regexp.Regexp, opt Options, out io.Writer) (bool, error) {
+	return scanFile(br, f.Path, re, func(n int, line []byte) (bool, error) {
 		if opt.FilesOnly {
 			if _, werr := fmt.Fprintln(out, f.RelativePath); werr != nil {
 				return true, writeError{werr}
@@ -168,22 +171,25 @@ func searchFile(f logstore.LogFile, re *regexp.Regexp, opt Options, out io.Write
 }
 
 // scanFile calls visit for every non-metadata line of the log at path that
-// matches re, with its 1-based number and text (a fresh slice the callee may
-// keep). visit returns true to stop scanning this log; an error from it ends
-// the scan and is returned as is. It reports whether any line matched.
-func scanFile(path string, re *regexp.Regexp, visit func(n int, line []byte) (done bool, err error)) (bool, error) {
+// matches re, with its 1-based number and text (valid for the duration of the
+// visit call). visit returns true to stop scanning this log; an error from it
+// ends the scan and is returned as is. It reports whether any line matched.
+func scanFile(br *bufio.Reader, path string, re *regexp.Regexp, visit func(n int, line []byte) (done bool, err error)) (bool, error) {
 	r, err := logstore.Open(path)
 	if err != nil {
 		return false, err
 	}
 	defer r.Close()
 
-	br := bufio.NewReaderSize(r, 64*1024)
+	br.Reset(r)
+	var longBuf []byte
 	matched := false
 	for n := 1; ; n++ {
-		line, err := readLine(br)
+		var line []byte
+		var err error
+		line, longBuf, err = readLine(br, longBuf)
 		if len(line) > 0 || err == nil {
-			if !bytes.HasPrefix(line, metaPrefix) && re.Match(line) {
+			if !logstore.IsCommandMeta(line) && re.Match(line) {
 				matched = true
 				done, verr := visit(n, line)
 				if verr != nil {
@@ -204,20 +210,31 @@ func scanFile(path string, re *regexp.Regexp, visit func(n int, line []byte) (do
 }
 
 // readLine returns the next line without its newline (and without a trailing
-// carriage return), truncated to MaxLineBytes. It returns io.EOF together with
-// any final unterminated line.
-func readLine(br *bufio.Reader) ([]byte, error) {
-	var line []byte
+// carriage return), truncated to MaxLineBytes. Lines that fit in br's buffer
+// alias br directly (zero allocations); lines spanning multiple chunks use
+// longBuf. It returns io.EOF together with any final unterminated line.
+func readLine(br *bufio.Reader, longBuf []byte) ([]byte, []byte, error) {
+	chunk, err := br.ReadSlice('\n')
+	if err != bufio.ErrBufferFull {
+		if len(chunk) > MaxLineBytes {
+			chunk = chunk[:MaxLineBytes]
+		}
+		chunk = bytes.TrimSuffix(chunk, []byte("\n"))
+		chunk = bytes.TrimSuffix(chunk, []byte("\r"))
+		return chunk, longBuf, err
+	}
+
+	longBuf = append(longBuf[:0], chunk[:min(len(chunk), MaxLineBytes)]...)
 	for {
-		chunk, err := br.ReadSlice('\n')
-		if room := MaxLineBytes - len(line); room > 0 {
-			line = append(line, chunk[:min(len(chunk), room)]...)
+		chunk, err = br.ReadSlice('\n')
+		if room := MaxLineBytes - len(longBuf); room > 0 {
+			longBuf = append(longBuf, chunk[:min(len(chunk), room)]...)
 		}
 		if err == bufio.ErrBufferFull {
 			continue
 		}
-		line = bytes.TrimSuffix(line, []byte("\n"))
+		line := bytes.TrimSuffix(longBuf, []byte("\n"))
 		line = bytes.TrimSuffix(line, []byte("\r"))
-		return line, err
+		return line, longBuf, err
 	}
 }

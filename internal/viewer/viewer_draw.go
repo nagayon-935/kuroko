@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -114,11 +115,8 @@ func (v *Viewer) outputCell(r, width int) string {
 	}
 	text := textwidth.Fit(tui.Plain(strings.ReplaceAll(string(v.currentOutputLines[lineIdx]), "\r", "")), width)
 
-	for idx, ml := range v.matchLines {
-		if ml == lineIdx {
-			text = highlightQuery(text, v.outputQuery, idx == v.activeMatch)
-			break
-		}
+	if idx, ok := slices.BinarySearch(v.matchLines, lineIdx); ok {
+		text = highlightQuery(text, v.outputQuery, idx == v.activeMatch)
 	}
 	if lineIdx == v.highlight-1 {
 		text = tui.Mark(text)

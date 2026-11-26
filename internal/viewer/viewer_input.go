@@ -56,6 +56,9 @@ func (v *Viewer) handleMouse(m tui.Mouse) {
 			v.scrollOutput(3)
 		}
 	case tui.MouseLeft:
+		if m.Release {
+			return
+		}
 		if inTimeline {
 			v.activePane = PaneTimeline
 			if idx := tui.ClickRowToIndex(m.Y-3, v.timelineScroll, len(v.filteredIdx)); idx >= 0 {
@@ -77,6 +80,7 @@ func (v *Viewer) handleSearchKey(key []byte) (quit bool) {
 		v.inSearch = false
 		if v.searchMode == SearchOutput {
 			v.outputQuery = v.searchQuery
+			v.searchQuery = v.savedCmdFilter
 			v.updateMatches()
 			if len(v.matchLines) > 0 {
 				v.scrollToLine(v.matchLines[v.activeMatch], v.bodyHeight())
@@ -84,6 +88,14 @@ func (v *Viewer) handleSearchKey(key []byte) (quit bool) {
 		}
 	case tui.EditCancel:
 		v.inSearch = false
+		v.searchQuery = v.savedCmdFilter
+		if v.searchMode == SearchCommands {
+			v.updateFilter()
+			v.updateOutput()
+		} else {
+			v.outputQuery = v.savedOutputQuery
+			v.updateMatches()
+		}
 	case tui.EditInterrupt:
 		return true
 	case tui.EditChanged:
@@ -115,10 +127,14 @@ func (v *Viewer) handleKey(b byte) (quit bool) {
 		v.stepActivePane(1, 3)
 	case 'k': // up
 		v.stepActivePane(-1, -3)
+	case 'g': // top of active pane
+		v.jumpActivePane(false)
+	case 'G': // bottom of active pane
+		v.jumpActivePane(true)
 	case tui.KeyCtrlD:
-		v.pageOutput(1)
+		v.pageActivePane(1)
 	case tui.KeyCtrlU:
-		v.pageOutput(-1)
+		v.pageActivePane(-1)
 	case '/': // Search Commands mode
 		v.startSearch(SearchCommands)
 	case 'f': // Search Output mode
@@ -131,9 +147,20 @@ func (v *Viewer) handleKey(b byte) (quit bool) {
 	return false
 }
 
-// handleEscapeKey applies arrow keys (Esc [ A..D) and PageUp/PageDown
-// (Esc [ 5 ~ / Esc [ 6 ~).
+// handleEscapeKey applies arrow keys (Esc [ A..D), Home/End, and PageUp/PageDown.
 func (v *Viewer) handleEscapeKey(key []byte) {
+	if tui.IsHomeKey(key) {
+		v.jumpActivePane(false)
+		return
+	}
+	if tui.IsEndKey(key) {
+		v.jumpActivePane(true)
+		return
+	}
+	if dir := tui.PageDir(key); dir != 0 {
+		v.pageActivePane(dir)
+		return
+	}
 	if c, ok := tui.CSIKey(key); ok {
 		switch c {
 		case 'A': // Up arrow
@@ -145,27 +172,50 @@ func (v *Viewer) handleEscapeKey(key []byte) {
 		case 'D': // Left arrow
 			v.activePane = PaneTimeline
 		}
+	}
+}
+
+// pageActivePane scrolls the active pane by one page in direction dir (+1 down, -1 up).
+func (v *Viewer) pageActivePane(dir int) {
+	page := dir * v.bodyHeight()
+	if v.activePane == PaneOutput {
+		v.scrollOutput(page)
 		return
 	}
-	if c, ok := tui.TildeKey(key); ok {
-		switch c {
-		case '5': // PageUp
-			v.pageOutput(-1)
-		case '6': // PageDown
-			v.pageOutput(1)
+	if len(v.filteredIdx) > 0 {
+		next := max(0, min(v.selected+page, len(v.filteredIdx)-1))
+		if next != v.selected {
+			v.selected = next
+			v.updateOutput()
 		}
 	}
 }
 
-// pageOutput scrolls the output pane by one page in direction dir (+1 down,
-// -1 up). It does nothing while the timeline pane is active.
-func (v *Viewer) pageOutput(dir int) {
+func (v *Viewer) jumpActivePane(toEnd bool) {
 	if v.activePane == PaneOutput {
-		v.scrollOutput(dir * v.bodyHeight())
+		if toEnd {
+			v.outputScroll = max(0, len(v.currentOutputLines)-v.bodyHeight())
+		} else {
+			v.outputScroll = 0
+		}
+		return
+	}
+	if len(v.filteredIdx) == 0 {
+		return
+	}
+	target := 0
+	if toEnd {
+		target = len(v.filteredIdx) - 1
+	}
+	if target != v.selected {
+		v.selected = target
+		v.updateOutput()
 	}
 }
 
 func (v *Viewer) startSearch(mode SearchMode) {
+	v.savedCmdFilter = v.searchQuery
+	v.savedOutputQuery = v.outputQuery
 	v.inSearch = true
 	v.searchMode = mode
 	v.searchQuery = ""
