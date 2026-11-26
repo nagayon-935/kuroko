@@ -52,6 +52,19 @@ func TestRunHelpAndVersion(t *testing.T) {
 			t.Errorf("run(%q) = %d, stdout %q; want the version and 0", args, code, stdout)
 		}
 	}
+	for _, sub := range []string{"logs", "view", "grep", "export", "migrate", "config", "completion"} {
+		code, stdout, stderr := runCLI(t, "help", sub)
+		if code != 0 || !strings.Contains(stdout, "usage: kuroko "+sub) || stderr != "" {
+			t.Errorf("run(help %s) = %d, stdout %q, stderr %q", sub, code, stdout, stderr)
+		}
+		code, stdout, stderr = runCLI(t, sub, "--help")
+		if code != 0 || stdout != "" || !strings.Contains(stderr, "usage: kuroko "+sub) {
+			t.Errorf("run(%s --help) = %d, stdout %q, stderr %q", sub, code, stdout, stderr)
+		}
+	}
+	if code, _, stderr := runCLI(t, "help", "unknown"); code != 1 || !strings.Contains(stderr, "unknown help topic") {
+		t.Errorf("run(help unknown) = %d, stderr %q", code, stderr)
+	}
 }
 
 func TestRunRejectsUnknownFlag(t *testing.T) {
@@ -70,6 +83,9 @@ func TestRunCompletion(t *testing.T) {
 	}
 	if code, _, _ := runCLI(t, "completion", "tcsh"); code != 1 {
 		t.Fatalf("completion tcsh = %d; want 1", code)
+	}
+	if code, _, _ := runCLI(t, "completion", "bash", "extra"); code != 1 {
+		t.Fatalf("completion bash extra = %d; want 1", code)
 	}
 }
 
@@ -178,7 +194,7 @@ func TestRunGrep(t *testing.T) {
 		{"ignore case", []string{"grep", "-i", "down"}, 0, "ssh/a/20260101_000000_ssh_a.log:2:Interface DOWN\n", ""},
 		{"files only", []string{"grep", "-l", "-i", "down|fine"}, 0, "ssh/a/20260101_000000_ssh_a.log\nssh/b/20260101_000000_ssh_b.log\n", ""},
 		{"no match is silent exit 1", []string{"grep", "zzz"}, 1, "", ""},
-		{"invalid regexp is exit 2", []string{"grep", "("}, 2, "", ""},
+		{"invalid regexp is exit 2", []string{"grep", "("}, 2, "", "invalid pattern"},
 		{"missing pattern is exit 2 with usage", []string{"grep"}, 2, "", "usage: kuroko grep"},
 		{"two patterns is exit 2 with usage", []string{"grep", "a", "b"}, 2, "", "usage: kuroko grep"},
 		{"unknown flag is exit 2", []string{"grep", "-z", "x"}, 2, "", "-z"},
@@ -190,8 +206,6 @@ func TestRunGrep(t *testing.T) {
 			if code != tt.wantCode || stdout != tt.wantStdout || !strings.Contains(stderr, tt.wantStderr) {
 				t.Fatalf("run(%q) = %d, %q, %q; want %d, %q, stderr containing %q", args, code, stdout, stderr, tt.wantCode, tt.wantStdout, tt.wantStderr)
 			}
-			// fail() writes through internal/console to the real stderr, so only
-			// flag-parse errors and warnings appear in the injected writer.
 			if tt.wantStderr == "" && stderr != "" {
 				t.Fatalf("unexpected stderr %q", stderr)
 			}

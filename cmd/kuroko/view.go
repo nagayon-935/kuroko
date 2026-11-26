@@ -10,12 +10,18 @@ import (
 	"github.com/nagayon-935/kuroko/internal/viewer"
 )
 
+const viewUsage = "usage: kuroko view [--follow | --line N] (--last | <logfile>)\nOpens a saved log in the split-pane viewer, or streams it with --follow (-f).\n  --last      open the most recent session\n  -f, --follow  stream the log to stdout until the session ends\n  --line N    open at 1-based raw log line N (cannot be combined with --follow)\n"
+
 // runView implements `kuroko view`: --follow streams the log, --line opens
 // the viewer at a line, otherwise the plain viewer runs. Argument and log
 // resolution errors come back with inViewer false (main prints "view error");
 // a failure of the viewer itself comes back with inViewer true ("viewer
 // error").
-func runView(args []string, logDir string, stdout io.Writer) (inViewer bool, err error) {
+func runView(args []string, logDir string, stdout, stderr io.Writer) (inViewer bool, err error) {
+	if isHelpFlag(args) {
+		fmt.Fprint(stderr, viewUsage)
+		return false, nil
+	}
 	viewArgs, following := splitFollowFlag(args)
 	if following {
 		if _, _, hasLine, _ := splitLineFlag(viewArgs); hasLine {

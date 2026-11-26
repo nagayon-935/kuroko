@@ -102,28 +102,36 @@ func (s Summary) Duration() time.Duration {
 	return s.Ended.Sub(s.Started)
 }
 
+var (
+	headerTitleBytes = []byte(HeaderTitle)
+	headerEndPrefix  = []byte("# ---")
+	footerMarker     = []byte("\n# " + SeparatorRule + "\n# Ended   : ")
+)
+
 func parseHeader(data []byte) Summary {
 	var s Summary
-	lines := strings.Split(string(data), "\n")
-	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "# kuroko session log" {
+	firstLine, rest, _ := bytes.Cut(data, []byte{'\n'})
+	if !bytes.Equal(bytes.TrimSpace(firstLine), headerTitleBytes) {
 		return s
 	}
-	for _, line := range lines[1:] {
-		if strings.HasPrefix(line, "# ---") || line == "" {
+	for len(rest) > 0 {
+		var line []byte
+		line, rest, _ = bytes.Cut(rest, []byte{'\n'})
+		if len(line) == 0 || bytes.HasPrefix(line, headerEndPrefix) {
 			break
 		}
-		key, value, ok := strings.Cut(line, ":")
+		key, value, ok := bytes.Cut(line, []byte{':'})
 		if !ok {
 			continue
 		}
-		value = strings.TrimSpace(value)
-		switch strings.TrimSpace(key) {
+		valStr := string(bytes.TrimSpace(value))
+		switch string(bytes.TrimSpace(key)) {
 		case "# Started":
-			s.Started, _ = time.Parse(time.RFC3339, value)
+			s.Started, _ = time.Parse(time.RFC3339Nano, valStr)
 		case "# Command":
-			s.Command = value
+			s.Command = valStr
 		case "# Target":
-			s.Target = value
+			s.Target = valStr
 		}
 	}
 	return s
@@ -133,22 +141,28 @@ func parseHeader(data []byte) Summary {
 // for an unfinished/plain log. Body output that merely resembles metadata
 // is not interpreted as a footer unless it terminates the log.
 func FooterOffset(data []byte) int {
-	marker := []byte("\n# " + strings.Repeat("-", 68) + "\n# Ended   : ")
-	i := bytes.LastIndex(data, marker)
+	off, _, _, _ := parseFooter(data)
+	return off
+}
+
+func parseFooter(data []byte) (offset int, ended time.Time, exitCode int, ok bool) {
+	i := bytes.LastIndex(data, footerMarker)
 	if i < 0 {
-		return len(data)
+		return len(data), time.Time{}, 0, false
 	}
 	lines := strings.Split(strings.TrimSpace(string(data[i:])), "\n")
 	if len(lines) != 3 || !strings.HasPrefix(lines[2], "# Exit    : ") {
-		return len(data)
+		return len(data), time.Time{}, 0, false
 	}
-	if _, err := time.Parse(time.RFC3339, strings.TrimSpace(strings.TrimPrefix(lines[1], "# Ended   : "))); err != nil {
-		return len(data)
+	ended, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(strings.TrimPrefix(lines[1], "# Ended   : ")))
+	if err != nil {
+		return len(data), time.Time{}, 0, false
 	}
-	if _, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(lines[2], "# Exit    : "))); err != nil {
-		return len(data)
+	exitCode, err = strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(lines[2], "# Exit    : ")))
+	if err != nil {
+		return len(data), time.Time{}, 0, false
 	}
-	return i
+	return i, ended, exitCode, true
 }
 
 func ReadSummary(path string) (Summary, error) {
@@ -212,10 +226,8 @@ func readSummary(r io.Reader) (Summary, error) {
 		}
 		tail = window.data
 	}
-	if i := FooterOffset(tail); i < len(tail) {
-		lines := strings.Split(strings.TrimSpace(string(tail[i:])), "\n")
-		s.Ended, _ = time.Parse(time.RFC3339, strings.TrimSpace(strings.TrimPrefix(lines[1], "# Ended   : ")))
-		code, _ := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(lines[2], "# Exit    : ")))
+	if _, ended, code, ok := parseFooter(tail); ok {
+		s.Ended = ended
 		s.ExitCode = &code
 	}
 	return s, nil

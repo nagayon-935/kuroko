@@ -93,8 +93,12 @@ func (d *drainer) drain() error {
 	for d.ctx.Err() == nil {
 		n, rerr := d.f.Read(d.buf)
 		if n > 0 {
-			if _, werr := d.w.Write(d.buf[:n]); werr != nil {
+			written, werr := d.w.Write(d.buf[:n])
+			if werr != nil {
 				return fmt.Errorf("writing output: %w", werr)
+			}
+			if written != n {
+				return fmt.Errorf("writing output: %w", io.ErrShortWrite)
 			}
 			d.total += int64(n)
 			d.tail = appendTail(d.tail, d.buf[:n])
@@ -137,13 +141,20 @@ func (d *drainer) gone(path string) (bool, error) {
 	return false, nil
 }
 
-// appendTail appends p to tail, keeping only the last tailWindow bytes.
+// appendTail appends p to tail, keeping only the last tailWindow bytes without
+// growing past tailWindow capacity on large reads.
 func appendTail(tail, p []byte) []byte {
-	tail = append(tail, p...)
-	if len(tail) > tailWindow {
-		tail = append(tail[:0], tail[len(tail)-tailWindow:]...)
+	if len(p) >= tailWindow {
+		if cap(tail) < tailWindow {
+			tail = make([]byte, 0, tailWindow)
+		}
+		return append(tail[:0], p[len(p)-tailWindow:]...)
 	}
-	return tail
+	if excess := len(tail) + len(p) - tailWindow; excess > 0 {
+		copy(tail, tail[excess:])
+		tail = tail[:len(tail)-excess]
+	}
+	return append(tail, p...)
 }
 
 // copyAll streams a complete (gzip) log to w in chunks, stopping early and

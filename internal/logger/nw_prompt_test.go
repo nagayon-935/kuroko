@@ -62,6 +62,15 @@ func legacySplitPromptInfo(line []byte) (prompt, cmd []byte, info PromptInfo) {
 	return promptBytes, cmdBytes, PromptInfo{Kind: kind, Hostname: hostname, Mode: mode}
 }
 
+func isAllDigits(s string) bool {
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return len(s) > 0
+}
+
 var nwPromptCorpus = []string{
 	"Router#", "Router>", "Router(config-if)#", "sw1(config-router)# show",
 	"admin@junos>", "edge-sw01.dc1#",

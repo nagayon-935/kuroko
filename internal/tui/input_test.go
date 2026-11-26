@@ -10,8 +10,9 @@ func TestParseMouse(t *testing.T) {
 		wantMouse bool
 	}{
 		{"left click press", "\x1b[<0;12;5M", Mouse{Button: MouseLeft, X: 12, Y: 5}, true},
+		{"left click release", "\x1b[<0;12;5m", Mouse{Button: MouseLeft, X: 12, Y: 5, Release: true}, true},
 		{"wheel up", "\x1b[<64;1;1M", Mouse{Button: MouseWheelUp, X: 1, Y: 1}, true},
-		{"wheel down release form", "\x1b[<65;40;20m", Mouse{Button: MouseWheelDown, X: 40, Y: 20}, true},
+		{"wheel down release form", "\x1b[<65;40;20m", Mouse{Button: MouseWheelDown, X: 40, Y: 20, Release: true}, true},
 		{"malformed report is swallowed as mouse input", "\x1b[<garbage", Mouse{Button: -1}, true},
 		{"arrow key is not mouse input", "\x1b[A", Mouse{}, false},
 		{"plain byte is not mouse input", "j", Mouse{}, false},
@@ -79,6 +80,10 @@ func TestEditLine(t *testing.T) {
 		want     EditResult
 	}{
 		{"printable byte appends", "ab", []byte("c"), "abc", EditChanged},
+		{"utf8 rune appends", "接続", []byte("先"), "接続先", EditChanged},
+		{"pasted text appends", "", []byte("10.70.72.248"), "10.70.72.248", EditChanged},
+		{"ctrl+u clears non-empty line", "abc", []byte{KeyCtrlU}, "", EditChanged},
+		{"ctrl+u on empty line is ignored", "", []byte{KeyCtrlU}, "", EditIgnored},
 		{"delete removes last byte", "abc", []byte{KeyDelete}, "ab", EditChanged},
 		{"backspace removes last byte", "abc", []byte{KeyBackspace}, "ab", EditChanged},
 		{"backspace removes full UTF-8 rune", "あいう", []byte{KeyBackspace}, "あい", EditChanged},

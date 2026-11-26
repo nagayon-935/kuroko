@@ -73,7 +73,7 @@ func writeFiltered(r io.Reader, w io.Writer) error {
 		}
 		if !continued {
 			// The prefix fits in the first fragment even for very long lines.
-			skip = bytes.HasPrefix(part, []byte("# kuroko:cmd:"))
+			skip = logstore.IsCommandMeta(part)
 			if !skip {
 				if haveLine {
 					if err := out.WriteByte('\n'); err != nil {

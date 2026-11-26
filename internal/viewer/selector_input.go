@@ -29,7 +29,9 @@ func (s *LogSelector) loop() error {
 		s.statusMessage = ""
 		var quit bool
 		if m, ok := tui.ParseMouse(key); ok {
-			s.handleMouse(m)
+			if err := s.handleMouse(t, m); err != nil {
+				return err
+			}
 		} else if s.inSearch {
 			quit = s.handleSearchKey(key)
 		} else if len(key) == 1 {
@@ -46,17 +48,24 @@ func (s *LogSelector) loop() error {
 	}
 }
 
-func (s *LogSelector) handleMouse(m tui.Mouse) {
+func (s *LogSelector) handleMouse(t *tui.Terminal, m tui.Mouse) error {
 	switch m.Button {
 	case tui.MouseWheelUp:
 		s.moveSelection(-1)
 	case tui.MouseWheelDown:
 		s.moveSelection(1)
 	case tui.MouseLeft:
+		if m.Release {
+			return nil
+		}
 		if idx := tui.ClickRowToIndex(m.Y-3, s.listScroll, len(s.filtered)); idx >= 0 {
+			if idx == s.selected {
+				return s.openSelected(t)
+			}
 			s.selected = idx
 		}
 	}
+	return nil
 }
 
 // handleSearchKey edits the filter prompt and reports whether the selector
@@ -64,8 +73,12 @@ func (s *LogSelector) handleMouse(m tui.Mouse) {
 func (s *LogSelector) handleSearchKey(key []byte) (quit bool) {
 	query, res := tui.EditLine(s.searchQuery, key)
 	switch res {
-	case tui.EditSubmit, tui.EditCancel:
+	case tui.EditSubmit:
 		s.inSearch = false
+	case tui.EditCancel:
+		s.inSearch = false
+		s.searchQuery = s.savedQuery
+		s.updateFilter()
 	case tui.EditInterrupt:
 		return true
 	case tui.EditChanged:
@@ -85,9 +98,20 @@ func (s *LogSelector) handleKey(t *tui.Terminal, b byte) (quit bool, err error) 
 		s.moveSelection(1)
 	case 'k': // Up
 		s.moveSelection(-1)
+	case 'g': // Top
+		s.selected = 0
+	case 'G': // Bottom
+		if len(s.filtered) > 0 {
+			s.selected = len(s.filtered) - 1
+		}
+	case tui.KeyCtrlD:
+		s.moveSelection(s.bodyHeight())
+	case tui.KeyCtrlU:
+		s.moveSelection(-s.bodyHeight())
 	case 's': // Toggle sort order
 		s.toggleSort()
 	case '/': // Filter mode
+		s.savedQuery = s.searchQuery
 		s.inSearch = true
 		s.searchQuery = ""
 		s.updateFilter()
@@ -97,8 +121,22 @@ func (s *LogSelector) handleKey(t *tui.Terminal, b byte) (quit bool, err error) 
 	return false, nil
 }
 
-// handleEscapeKey applies the up/down arrow keys.
+// handleEscapeKey applies arrow, Home/End, and PageUp/PageDown keys.
 func (s *LogSelector) handleEscapeKey(key []byte) {
+	if tui.IsHomeKey(key) {
+		s.selected = 0
+		return
+	}
+	if tui.IsEndKey(key) {
+		if len(s.filtered) > 0 {
+			s.selected = len(s.filtered) - 1
+		}
+		return
+	}
+	if dir := tui.PageDir(key); dir != 0 {
+		s.moveSelection(dir * s.bodyHeight())
+		return
+	}
 	if c, ok := tui.CSIKey(key); ok {
 		switch c {
 		case 'A': // Up

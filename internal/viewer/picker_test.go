@@ -51,6 +51,8 @@ func TestPickerKeys(t *testing.T) {
 		{"mouse wheel down", 7, esc + "[<65;5;5M", 8, pickerNone},
 		{"mouse wheel up", 7, esc + "[<64;5;5M", 6, pickerNone},
 		{"click selects the row", 0, esc + "[<0;5;6M", 3, pickerNone},
+		{"click on selected row opens", 3, esc + "[<0;5;6M", 3, pickerOpen},
+		{"click release does not open", 3, esc + "[<0;5;6m", 3, pickerNone},
 		{"click below the rows is ignored", 2, esc + "[<0;5;40M", 2, pickerNone},
 	}
 	for _, tt := range tests {

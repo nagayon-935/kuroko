@@ -217,7 +217,7 @@ func (p *prompt) selectItem(title string, items []string, manual, back bool) (st
 		}
 		width, height := tui.Size()
 		st.scroll = tui.FollowSelection(st.selected, st.scroll, listBodyHeight(width, height))
-		if st.escape == 0 {
+		if st.escape == 0 && utf8.ValidString(st.query) {
 			st.previewScroll = p.drawMenu(title, filtered, st.selected, st.scroll, st.previewScroll, width, height, st.query, manual, back)
 		}
 		key, err := p.readByte()
@@ -353,7 +353,7 @@ func (p *prompt) line(label string) (string, error) {
 	escape := 0
 	sequence := ""
 	for {
-		if escape == 0 {
+		if escape == 0 && utf8.Valid(value) {
 			fmt.Fprintf(p.out, "\r\x1b[2K%s%s", label, tui.Plain(string(value)))
 		}
 		key, err := p.readByte()

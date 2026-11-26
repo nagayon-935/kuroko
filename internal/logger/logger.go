@@ -2,6 +2,7 @@ package logger
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -29,6 +30,8 @@ type Logger struct {
 	Path         string
 	writeSeq     uint64    // monotonic counter for raw debug chunks
 	seqBuf       []byte    // incomplete escape sequence carried across Write calls
+	mergeBuf     []byte    // scratch buffer used only when seqBuf must be prepended
+	normBuf      []byte    // scratch buffer for CRLF normalization
 	altScreen    bool      // true while a full-screen app (vim/less) owns the terminal
 	logAltScreen bool      // screen wraps the whole connection in alternate-screen mode
 	term         *terminal // turns the byte stream into log rows
@@ -64,13 +67,7 @@ func New(logDir string, args []string, redactionEnabled bool) (*Logger, error) {
 	cmdLine := sanitizeHeaderValue(strings.Join(args, " "), redactionEnabled)
 	targetAddr := sanitizeHeaderValue(TargetAddress(args), redactionEnabled)
 
-	header := fmt.Sprintf(
-		"# kuroko session log\n# Started : %s\n# Command : %s\n# Target  : %s\n# %s\n\n",
-		time.Now().Format(time.RFC3339Nano),
-		cmdLine,
-		targetAddr,
-		strings.Repeat("-", 68),
-	)
+	header := logstore.FormatHeader(time.Now(), cmdLine, targetAddr)
 	if _, err := f.WriteString(header); err != nil {
 		f.Close()
 		_ = os.Remove(path)
@@ -99,8 +96,10 @@ func New(logDir string, args []string, redactionEnabled bool) (*Logger, error) {
 	return l, nil
 }
 
+var headerNewlineReplacer = strings.NewReplacer("\r", " ", "\n", " ")
+
 func sanitizeHeaderValue(s string, redact bool) string {
-	s = strings.NewReplacer("\r", " ", "\n", " ").Replace(s)
+	s = headerNewlineReplacer.Replace(s)
 	if redact {
 		s = string(RedactText([]byte(s)))
 	}
@@ -119,16 +118,18 @@ func (l *Logger) Write(p []byte) (int, error) {
 		fmt.Fprintf(l.rawFile, "=== write %d (%d bytes) ===\n%q\n", l.writeSeq, len(p), p)
 	}
 
-	// Merge buffered partial escape sequence from the previous write so we
-	// never split an escape sequence across buffer boundaries.
-	data := append(l.seqBuf, p...)
-	l.seqBuf = nil
+	// Merge buffered partial escape sequence from the previous write only when
+	// one exists, avoiding a full-chunk copy on the common path.
+	data := p
+	if len(l.seqBuf) > 0 {
+		l.mergeBuf = append(append(l.mergeBuf[:0], l.seqBuf...), p...)
+		l.seqBuf = l.seqBuf[:0]
+		data = l.mergeBuf
+	}
 
 	// Save any trailing incomplete ANSI escape sequence for the next write.
 	if n := incompleteEscapePrefix(data); n > 0 {
-		tail := data[len(data)-n:]
-		l.seqBuf = make([]byte, n)
-		copy(l.seqBuf, tail)
+		l.seqBuf = append(l.seqBuf[:0], data[len(data)-n:]...)
 		data = data[:len(data)-n]
 	}
 
@@ -154,9 +155,9 @@ func (l *Logger) writeFiltered(data []byte) error {
 		if !l.altScreen {
 			idx, n := indexAny(data, enterAltScreen)
 			if idx < 0 {
-				return l.term.feed(normalizeLineEndings(data))
+				return l.feedNormalized(data)
 			}
-			if err := l.term.feed(normalizeLineEndings(data[:idx])); err != nil {
+			if err := l.feedNormalized(data[:idx]); err != nil {
 				return err
 			}
 			// Consume the transition; screen sessions keep the output inside it.
@@ -166,12 +167,12 @@ func (l *Logger) writeFiltered(data []byte) error {
 			idx, n := indexAny(data, exitAltScreen)
 			if idx < 0 {
 				if l.logAltScreen {
-					return l.term.feed(normalizeLineEndings(data))
+					return l.feedNormalized(data)
 				}
 				return nil // still inside alternate screen; discard
 			}
 			if l.logAltScreen {
-				if err := l.term.feed(normalizeLineEndings(data[:idx])); err != nil {
+				if err := l.feedNormalized(data[:idx]); err != nil {
 					return err
 				}
 			}
@@ -180,6 +181,14 @@ func (l *Logger) writeFiltered(data []byte) error {
 		}
 	}
 	return nil
+}
+
+func (l *Logger) feedNormalized(data []byte) error {
+	if bytes.IndexByte(data, '\r') < 0 {
+		return l.term.feed(data)
+	}
+	l.normBuf = normalizeLineEndingsInto(l.normBuf[:0], data)
+	return l.term.feed(l.normBuf)
 }
 
 // Close flushes any remaining buffered output, writes the session footer, and
@@ -215,10 +224,11 @@ func (l *Logger) doClose(exitCode int) (err error) {
 	// Output held back as a possibly split escape sequence will not be
 	// completed any more; pass it on so trailing text is not lost.
 	if len(l.seqBuf) > 0 {
-		if err := l.writeFiltered(l.seqBuf); err != nil {
+		seq := l.seqBuf
+		l.seqBuf = nil
+		if err := l.writeFiltered(seq); err != nil {
 			return err
 		}
-		l.seqBuf = nil
 	}
 	// The session is ending, so no further redraw can occur: write out every
 	// row still held for one, including an unterminated last line.
@@ -226,12 +236,7 @@ func (l *Logger) doClose(exitCode int) (err error) {
 		return err
 	}
 
-	footer := fmt.Sprintf(
-		"\n# %s\n# Ended   : %s\n# Exit    : %d\n",
-		strings.Repeat("-", 68),
-		time.Now().Format(time.RFC3339Nano),
-		exitCode,
-	)
+	footer := logstore.FormatFooter(time.Now(), exitCode)
 	if _, err := l.buf.WriteString(footer); err != nil {
 		return err
 	}

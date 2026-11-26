@@ -48,6 +48,8 @@ type Viewer struct {
 	filteredIdx        []int // Indices into allCmds matching current search
 	selected           int   // Index into filteredIdx
 	searchQuery        string
+	savedCmdFilter     string // command filter saved when entering search mode
+	savedOutputQuery   string // output query saved when entering output search
 	inSearch           bool
 	searchMode         SearchMode
 	outputQuery        string
@@ -165,9 +167,6 @@ func gzipSizeHint(path string) int {
 	return int(n)
 }
 
-// outputLinePrefix marks metadata lines that are hidden from the output pane.
-var outputLinePrefix = []byte("# kuroko:cmd:")
-
 // splitOutputLines splits data on LF and drops lines starting with the
 // metadata prefix, returning sub-slices of data (no copy).
 //
@@ -188,7 +187,7 @@ func splitOutputLines(data []byte) [][]byte {
 		if nl >= 0 {
 			line = rest[:nl]
 		}
-		if !bytes.HasPrefix(line, outputLinePrefix) {
+		if !logstore.IsCommandMeta(line) {
 			lines = append(lines, line)
 		}
 		if nl < 0 {
@@ -386,8 +385,8 @@ func (v *Viewer) parseMetadata() {
 			line = rest[:nl]
 		}
 
-		if bytes.HasPrefix(line, outputLinePrefix) {
-			payload := string(bytes.TrimSuffix(line, []byte{'\r'})[len(outputLinePrefix):])
+		if logstore.IsCommandMeta(line) {
+			payload := string(bytes.TrimSuffix(line, []byte{'\r'})[len(logstore.CommandMetaPrefix):])
 
 			var timestamp string
 			var command string

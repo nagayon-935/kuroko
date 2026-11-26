@@ -27,6 +27,7 @@ type LogSelector struct {
 	filtered    []selectorItem
 	selected    int
 	searchQuery string
+	savedQuery  string // filter query saved when entering search mode
 	inSearch    bool
 	sortDesc    bool // true = newest first (default), false = oldest first
 	width       int
@@ -161,10 +162,10 @@ func (s *LogSelector) updateFilter() {
 }
 
 func (s *LogSelector) moveSelection(delta int) {
-	next := s.selected + delta
-	if next >= 0 && next < len(s.filtered) {
-		s.selected = next
+	if len(s.filtered) == 0 {
+		return
 	}
+	s.selected = max(0, min(s.selected+delta, len(s.filtered)-1))
 }
 
 // bodyHeight returns the number of rows available for the log list,

@@ -2,10 +2,11 @@ package logger
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	"time"
 	"unicode/utf8"
+
+	"github.com/nagayon-935/kuroko/internal/logstore"
 )
 
 // terminal is a minimal terminal emulator that turns the PTY byte stream
@@ -19,9 +20,11 @@ type terminal struct {
 	prompts  promptTracker
 	redactor *redactor // nil when redaction is disabled
 
-	pendingCR bool         // \r was the last control char seen; defer reset until next char
-	esc       escapeParser // escape sequence in progress, possibly split across feed calls
-	runeBuf   []byte       // incomplete UTF-8 rune carried across feed calls
+	pendingCR   bool         // \r was the last control char seen; defer reset until next char
+	esc         escapeParser // escape sequence in progress, possibly split across feed calls
+	runeBuf     []byte       // incomplete UTF-8 rune carried across feed calls
+	lineScratch []byte       // reusable buffer for rendering the current line
+	metaScratch []byte       // reusable buffer for formatting command metadata
 }
 
 func newTerminal(out io.Writer, redactionEnabled, networkMode bool) *terminal {
@@ -123,17 +126,20 @@ func (t *terminal) feed(data []byte) error {
 // commitLine records the current row in the row window, tagged with a
 // command marker when it carries a prompt, and starts a fresh row.
 func (t *terminal) commitLine() error {
-	out, hasCommand := t.prompts.classify(t.line.text())
+	raw := t.line.textInto(t.lineScratch[:0])
+	t.lineScratch = raw
+	out, hasCommand := t.prompts.classify(raw)
 
 	var meta []byte
 	if hasCommand {
-		meta = []byte(fmt.Sprintf("# kuroko:cmd:%s\n", time.Now().Format(time.RFC3339)))
+		meta = logstore.AppendCommandMeta(t.metaScratch[:0], time.Now())
+		t.metaScratch = meta
 	}
 
 	if t.redactor != nil {
 		out = t.redactor.redact(out)
 	}
-	if err := t.rows.commit(pendingRow{meta: meta, text: out}); err != nil {
+	if err := t.rows.commitBytes(meta, out); err != nil {
 		return err
 	}
 	t.line.reset()
@@ -148,7 +154,9 @@ func (t *terminal) commitLine() error {
 // survive readline's accept-line redraw.
 func (t *terminal) snapshotLine() {
 	if t.line.col > 0 {
-		t.prompts.snapshot(t.line.text())
+		raw := t.line.textInto(t.lineScratch[:0])
+		t.lineScratch = raw
+		t.prompts.snapshot(raw)
 	}
 	t.line.home()
 	t.pendingCR = false
@@ -185,7 +193,9 @@ func (t *terminal) handleOSC(payload []byte) {
 	case 'B':
 		// The prompt ends at the cursor; anything right of it (a right
 		// prompt drawn before the mark) is not part of it.
-		t.prompts.markPromptEnd(t.line.textToCursor())
+		raw := t.line.textToCursorInto(t.lineScratch[:0])
+		t.lineScratch = raw
+		t.prompts.markPromptEnd(raw)
 	}
 }
 
@@ -236,13 +246,18 @@ func (t *terminal) finish() error {
 	}
 
 	// Flush any unterminated line; apply the same prompt recovery as commitLine.
-	out := t.prompts.finalLine(t.line.text())
+	raw := t.line.textInto(t.lineScratch[:0])
+	t.lineScratch = raw
+	out := t.prompts.finalLine(raw)
 	if len(out) == 0 {
 		return nil
 	}
 	if t.redactor != nil {
 		out = t.redactor.redact(out)
 	}
-	_, err := t.rows.out.Write(append(out, '\n'))
+	if _, err := t.rows.out.Write(out); err != nil {
+		return err
+	}
+	_, err := t.rows.out.Write(newline)
 	return err
 }

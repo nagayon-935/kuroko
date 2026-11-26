@@ -16,7 +16,7 @@ import (
 func runLogs(args []string, logDir string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("logs", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	fs.Usage = func() { fmt.Fprintln(stderr, "usage: kuroko logs [--info]") }
+	fs.Usage = func() { fmt.Fprint(stderr, logsUsage) }
 	info := fs.Bool("info", false, "show storage root, counts, sizes and groups")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -40,9 +40,7 @@ func runLogs(args []string, logDir string, stdout, stderr io.Writer) error {
 func runMigration(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("migrate", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: kuroko migrate [--from /absolute/log/directory]\nCopies legacy logs and config to ~/.kuroko, verifies SHA-256 checksums, then removes verified sources.")
-	}
+	fs.Usage = func() { fmt.Fprint(stderr, migrateUsage) }
 	from := fs.String("from", "", "override the legacy log root")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {

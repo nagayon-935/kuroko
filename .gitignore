@@ -4,6 +4,8 @@
 # Session logs (may contain sensitive info: passwords, IPs, configs)
 logs/
 *.log
+*.log.gz
+*.log.raw
 
 # Claude Code local settings
 .claude/
